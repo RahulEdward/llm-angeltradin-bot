@@ -113,29 +113,51 @@ class LoginRequest(BaseModel):
 # Authentication Endpoints
 # ============================================
 
-# Simple user database (in production, use a proper database)
-USERS = {
-    "admin": {"password": "admin123", "role": "admin"},
-    "guest": {"password": "guest", "role": "guest"},
-    "user": {"password": "user123", "role": "user"}
-}
+# Import database module
+from src.database import authenticate_user, get_all_users, create_user
 
 
 @app.post("/api/login")
 async def login(request: LoginRequest):
     """Authenticate user and return token."""
-    user = USERS.get(request.username)
+    user = authenticate_user(request.username, request.password)
     
-    if not user or user["password"] != request.password:
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
     
     # In production, generate a proper JWT token
     return {
         "success": True,
-        "username": request.username,
+        "username": user["username"],
         "role": user["role"],
-        "token": f"token_{request.username}_{datetime.now().timestamp()}"
+        "user_id": user["id"],
+        "token": f"token_{user['username']}_{datetime.now().timestamp()}"
     }
+
+
+@app.get("/api/users")
+async def list_users():
+    """Get all users (admin only)."""
+    users = get_all_users()
+    return {"users": users}
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+    email: Optional[str] = None
+
+
+@app.post("/api/users")
+async def register_user(request: CreateUserRequest):
+    """Create a new user."""
+    user_id = create_user(request.username, request.password, request.role, request.email)
+    
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    
+    return {"success": True, "user_id": user_id}
 
 
 @app.get("/api/info")

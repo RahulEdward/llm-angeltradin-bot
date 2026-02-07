@@ -90,7 +90,6 @@ const Settings = ({ embedded = false, onClose }) => {
                 alert(err.detail || 'Failed to save account');
             }
         } catch (err) {
-            // Demo: Add locally
             const newAccount = {
                 id: Date.now().toString(),
                 broker: 'angelone',
@@ -115,9 +114,7 @@ const Settings = ({ embedded = false, onClose }) => {
 
         try {
             await fetch(`/api/broker/accounts/${accountId}`, { method: 'DELETE' });
-        } catch (err) {
-            // Continue anyway
-        }
+        } catch (err) { }
         setBrokerAccounts(brokerAccounts.filter(a => a.id !== accountId));
     };
 
@@ -148,28 +145,25 @@ const Settings = ({ embedded = false, onClose }) => {
             });
 
             if (res.ok) {
-                const data = await res.json();
-                // Update account status
                 setBrokerAccounts(brokerAccounts.map(a =>
                     a.id === connectingAccountId
-                        ? { ...a, status: 'connected', session: data.session }
+                        ? { ...a, status: 'connected' }
                         : a
                 ));
                 setShowTotpModal(false);
-                alert('✅ Broker connected successfully! Symbol fetching started.');
+                alert('✅ Broker connected successfully!');
             } else {
                 const err = await res.json();
                 setConnectionError(err.detail || 'Connection failed');
             }
         } catch (err) {
-            // Demo: Simulate success
             setBrokerAccounts(brokerAccounts.map(a =>
                 a.id === connectingAccountId
                     ? { ...a, status: 'connected' }
                     : a
             ));
             setShowTotpModal(false);
-            alert('✅ Broker connected successfully! (Demo mode)');
+            alert('✅ Broker connected! (Demo mode)');
         } finally {
             setConnecting(false);
         }
@@ -178,9 +172,7 @@ const Settings = ({ embedded = false, onClose }) => {
     const disconnectBroker = async (accountId) => {
         try {
             await fetch(`/api/broker/disconnect/${accountId}`, { method: 'POST' });
-        } catch (err) {
-            // Continue
-        }
+        } catch (err) { }
         setBrokerAccounts(brokerAccounts.map(a =>
             a.id === accountId ? { ...a, status: 'disconnected' } : a
         ));
@@ -227,7 +219,7 @@ const Settings = ({ embedded = false, onClose }) => {
                 {activeTab === 'accounts' && (
                     <div className="tab-pane">
                         {/* Broker Selection */}
-                        <div className="broker-selection">
+                        <div className="section-box">
                             <h4>🏦 Select Broker</h4>
                             <div className="broker-buttons">
                                 <button
@@ -235,38 +227,30 @@ const Settings = ({ embedded = false, onClose }) => {
                                     onClick={() => setSelectedBroker('angelone')}
                                 >
                                     <span className="broker-icon">📈</span>
-                                    <span className="broker-name">Angel One</span>
+                                    <span>Angel One</span>
                                 </button>
-                                <button
-                                    className={`broker-btn ${selectedBroker === 'zerodha' ? 'selected' : ''}`}
-                                    onClick={() => setSelectedBroker('zerodha')}
-                                    disabled
-                                >
+                                <button className="broker-btn disabled" disabled>
                                     <span className="broker-icon">🔶</span>
-                                    <span className="broker-name">Zerodha</span>
-                                    <span className="coming-soon">Coming Soon</span>
+                                    <span>Zerodha</span>
+                                    <span className="soon">Soon</span>
                                 </button>
-                                <button
-                                    className={`broker-btn ${selectedBroker === 'upstox' ? 'selected' : ''}`}
-                                    onClick={() => setSelectedBroker('upstox')}
-                                    disabled
-                                >
+                                <button className="broker-btn disabled" disabled>
                                     <span className="broker-icon">🟣</span>
-                                    <span className="broker-name">Upstox</span>
-                                    <span className="coming-soon">Coming Soon</span>
+                                    <span>Upstox</span>
+                                    <span className="soon">Soon</span>
                                 </button>
                             </div>
                         </div>
 
-                        {/* Angel One Credentials Form */}
+                        {/* Angel One Form */}
                         {selectedBroker === 'angelone' && (
-                            <div className="credentials-form">
+                            <div className="section-box credentials-form">
                                 <h4>🔐 Angel One Credentials</h4>
                                 <div className="form-group">
                                     <label>Client ID</label>
                                     <input
                                         type="text"
-                                        placeholder="Enter your Client ID (e.g., ABC123)"
+                                        placeholder="Enter Client ID"
                                         value={angelCredentials.clientId}
                                         onChange={(e) => setAngelCredentials({ ...angelCredentials, clientId: e.target.value })}
                                         className="form-input"
@@ -276,7 +260,7 @@ const Settings = ({ embedded = false, onClose }) => {
                                     <label>API Key</label>
                                     <input
                                         type="password"
-                                        placeholder="Enter your API Key"
+                                        placeholder="Enter API Key"
                                         value={angelCredentials.apiKey}
                                         onChange={(e) => setAngelCredentials({ ...angelCredentials, apiKey: e.target.value })}
                                         className="form-input"
@@ -286,84 +270,54 @@ const Settings = ({ embedded = false, onClose }) => {
                                     <label>PIN Number</label>
                                     <input
                                         type="password"
-                                        placeholder="Enter your 4-digit PIN"
+                                        placeholder="Enter PIN"
                                         value={angelCredentials.pin}
                                         onChange={(e) => setAngelCredentials({ ...angelCredentials, pin: e.target.value })}
                                         className="form-input"
                                         maxLength={4}
                                     />
                                 </div>
-                                <button className="save-credentials-btn" onClick={saveAngelAccount}>
+                                <button className="save-account-btn" onClick={saveAngelAccount}>
                                     💾 Save Account
                                 </button>
-                                <p className="security-note">
-                                    🔒 Your credentials are encrypted and stored securely
-                                </p>
                             </div>
                         )}
 
-                        {/* Connected Accounts */}
-                        <div className="connected-accounts">
+                        {/* Saved Accounts */}
+                        <div className="section-box">
                             <div className="section-header">
-                                <h4>📋 Saved Broker Accounts</h4>
-                                <button className="refresh-btn" onClick={loadAccounts}>
-                                    🔄 Refresh
-                                </button>
+                                <h4>📋 Saved Accounts</h4>
+                                <button className="refresh-btn" onClick={loadAccounts}>🔄 Refresh</button>
                             </div>
 
                             <div className="accounts-list">
                                 {loadingAccounts ? (
                                     <div className="loading-text">Loading accounts...</div>
                                 ) : brokerAccounts.length === 0 ? (
-                                    <div className="empty-text">No broker accounts configured</div>
+                                    <div className="empty-text">No accounts saved</div>
                                 ) : (
                                     brokerAccounts.map(account => (
                                         <div key={account.id} className={`account-card ${account.status}`}>
-                                            <div className="account-header">
-                                                <div className="broker-info">
-                                                    <span className="broker-badge">
-                                                        {account.broker === 'angelone' ? '📈 Angel One' : account.broker}
-                                                    </span>
-                                                    <span className={`status-badge ${account.status}`}>
+                                            <div className="account-row">
+                                                <div className="account-info">
+                                                    <span className="broker-badge">📈 Angel One</span>
+                                                    <span className={`status ${account.status}`}>
                                                         {account.status === 'connected' ? '🟢 Connected' : '🔴 Disconnected'}
                                                     </span>
                                                 </div>
-                                                <button
-                                                    className="delete-btn"
-                                                    onClick={() => deleteAccount(account.id)}
-                                                >
-                                                    🗑️
-                                                </button>
+                                                <button className="delete-btn" onClick={() => deleteAccount(account.id)}>🗑️</button>
                                             </div>
-
                                             <div className="account-details">
-                                                <div className="detail-row">
-                                                    <span className="label">Client ID:</span>
-                                                    <span className="value">{account.client_id || account.masked_credentials?.client_id}</span>
-                                                </div>
-                                                <div className="detail-row">
-                                                    <span className="label">API Key:</span>
-                                                    <span className="value masked">{account.masked_credentials?.api_key || '••••••••'}</span>
-                                                </div>
-                                                <div className="detail-row">
-                                                    <span className="label">PIN:</span>
-                                                    <span className="value masked">{account.masked_credentials?.pin || '••••'}</span>
-                                                </div>
+                                                <span>Client: <b>{account.client_id || account.masked_credentials?.client_id}</b></span>
+                                                <span>API: <b>{account.masked_credentials?.api_key || '••••'}</b></span>
                                             </div>
-
                                             <div className="account-actions">
                                                 {account.status === 'connected' ? (
-                                                    <button
-                                                        className="disconnect-btn"
-                                                        onClick={() => disconnectBroker(account.id)}
-                                                    >
+                                                    <button className="disconnect-btn" onClick={() => disconnectBroker(account.id)}>
                                                         ⏹️ Disconnect
                                                     </button>
                                                 ) : (
-                                                    <button
-                                                        className="connect-btn"
-                                                        onClick={() => initiateConnect(account)}
-                                                    >
+                                                    <button className="connect-btn" onClick={() => initiateConnect(account)}>
                                                         🔗 Connect
                                                     </button>
                                                 )}
@@ -384,7 +338,7 @@ const Settings = ({ embedded = false, onClose }) => {
                             <select
                                 value={llmProvider}
                                 onChange={(e) => setLlmProvider(e.target.value)}
-                                className="form-select"
+                                className="form-input"
                             >
                                 <option value="none">None (No LLM)</option>
                                 <option value="deepseek">DeepSeek</option>
@@ -406,23 +360,25 @@ const Settings = ({ embedded = false, onClose }) => {
                             </div>
                         )}
 
-                        <button className="save-btn" onClick={saveLLMSettings}>
-                            {saved ? '✓ Saved!' : 'Save Changes'}
-                        </button>
+                        <div className="footer-actions">
+                            <button className="save-btn" onClick={saveLLMSettings}>
+                                {saved ? '✓ Saved!' : 'Save Changes'}
+                            </button>
+                        </div>
                     </div>
                 )}
             </div>
 
             {/* TOTP Modal */}
             {showTotpModal && (
-                <div className="totp-modal-overlay" onClick={() => setShowTotpModal(false)}>
-                    <div className="totp-modal" onClick={e => e.stopPropagation()}>
-                        <div className="totp-header">
-                            <h3>🔐 Enter TOTP Code</h3>
+                <div className="modal-overlay" onClick={() => setShowTotpModal(false)}>
+                    <div className="modal" onClick={e => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h3>🔐 Enter TOTP</h3>
                             <button className="close-btn" onClick={() => setShowTotpModal(false)}>×</button>
                         </div>
-                        <div className="totp-body">
-                            <p>Enter the 6-digit code from your authenticator app</p>
+                        <div className="modal-body">
+                            <p>Enter 6-digit code from authenticator</p>
                             <input
                                 type="text"
                                 className="totp-input"
@@ -432,11 +388,9 @@ const Settings = ({ embedded = false, onClose }) => {
                                 maxLength={6}
                                 autoFocus
                             />
-                            {connectionError && (
-                                <div className="error-message">{connectionError}</div>
-                            )}
+                            {connectionError && <div className="error-text">{connectionError}</div>}
                         </div>
-                        <div className="totp-footer">
+                        <div className="modal-footer">
                             <button
                                 className="connect-totp-btn"
                                 onClick={connectWithTotp}
@@ -454,176 +408,63 @@ const Settings = ({ embedded = false, onClose }) => {
                     display: flex;
                     flex-direction: column;
                     height: 100%;
-                    max-height: 70vh;
                 }
 
-                /* Tabs */
+                /* Tabs - Matching Reference */
                 .settings-tabs {
                     display: flex;
-                    border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+                    gap: 0;
                     margin-bottom: 20px;
+                    border-bottom: 1px solid rgba(255,255,255,0.1);
                 }
 
                 .tab-btn {
                     flex: 1;
-                    padding: 12px 20px;
+                    padding: 14px 20px;
                     background: transparent;
                     border: none;
                     color: #848E9C;
                     font-size: 0.95rem;
                     cursor: pointer;
-                    border-bottom: 2px solid transparent;
-                    margin-bottom: -2px;
                     transition: all 0.2s;
+                    border-bottom: 2px solid transparent;
+                    margin-bottom: -1px;
                 }
 
-                .tab-btn:hover { color: #EAECEF; }
+                .tab-btn:hover {
+                    color: #EAECEF;
+                }
 
                 .tab-btn.active {
-                    color: #00ff9d;
-                    border-bottom-color: #00ff9d;
-                    background: rgba(0, 255, 157, 0.05);
+                    color: #00F0FF;
+                    background: rgba(0, 240, 255, 0.08);
+                    border-bottom-color: #00F0FF;
                 }
 
                 /* Content */
                 .settings-content {
                     flex: 1;
                     overflow-y: auto;
-                    padding-right: 5px;
                 }
 
                 .tab-pane {
                     display: flex;
                     flex-direction: column;
-                    gap: 20px;
+                    gap: 16px;
                 }
 
-                /* Broker Selection */
-                .broker-selection h4,
-                .credentials-form h4,
-                .connected-accounts h4 {
+                /* Section Box */
+                .section-box {
+                    background: rgba(20, 25, 35, 0.6);
+                    border: 1px solid rgba(255,255,255,0.08);
+                    border-radius: 10px;
+                    padding: 16px;
+                }
+
+                .section-box h4 {
                     margin: 0 0 12px 0;
-                    font-size: 1rem;
-                    color: #EAECEF;
-                }
-
-                .broker-buttons {
-                    display: flex;
-                    gap: 12px;
-                    flex-wrap: wrap;
-                }
-
-                .broker-btn {
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    gap: 6px;
-                    padding: 16px 24px;
-                    background: rgba(255, 255, 255, 0.03);
-                    border: 2px solid rgba(255, 255, 255, 0.1);
-                    border-radius: 12px;
-                    cursor: pointer;
-                    transition: all 0.2s;
-                    min-width: 120px;
-                    position: relative;
-                }
-
-                .broker-btn:hover:not(:disabled) {
-                    border-color: #00ff9d;
-                    background: rgba(0, 255, 157, 0.05);
-                }
-
-                .broker-btn.selected {
-                    border-color: #00ff9d;
-                    background: rgba(0, 255, 157, 0.1);
-                    box-shadow: 0 0 20px rgba(0, 255, 157, 0.2);
-                }
-
-                .broker-btn:disabled {
-                    opacity: 0.5;
-                    cursor: not-allowed;
-                }
-
-                .broker-icon { font-size: 1.5rem; }
-                .broker-name { font-size: 0.9rem; color: #EAECEF; font-weight: 600; }
-
-                .coming-soon {
-                    position: absolute;
-                    top: -8px;
-                    right: -8px;
-                    background: #F0B90B;
-                    color: #0A0B0D;
-                    font-size: 0.6rem;
-                    padding: 2px 6px;
-                    border-radius: 4px;
-                    font-weight: 700;
-                }
-
-                /* Credentials Form */
-                .credentials-form {
-                    background: rgba(0, 255, 157, 0.03);
-                    border: 1px solid rgba(0, 255, 157, 0.2);
-                    border-radius: 12px;
-                    padding: 20px;
-                }
-
-                .form-group {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 6px;
-                    margin-bottom: 16px;
-                }
-
-                .form-group label {
-                    font-size: 0.9rem;
-                    color: #EAECEF;
-                }
-
-                .form-input, .form-select {
-                    padding: 12px 14px;
-                    background: rgba(0, 0, 0, 0.3);
-                    border: 1px solid rgba(255, 255, 255, 0.15);
-                    border-radius: 8px;
-                    color: #EAECEF;
                     font-size: 0.95rem;
-                }
-
-                .form-input::placeholder { color: #5E6673; }
-
-                .form-input:focus, .form-select:focus {
-                    outline: none;
-                    border-color: #00ff9d;
-                }
-
-                .save-credentials-btn {
-                    width: 100%;
-                    background: linear-gradient(135deg, #00ff9d, #00cc7d);
-                    color: #0A0B0D;
-                    border: none;
-                    padding: 14px;
-                    border-radius: 8px;
-                    font-size: 1rem;
-                    font-weight: 700;
-                    cursor: pointer;
-                    transition: all 0.2s;
-                    margin-top: 10px;
-                }
-
-                .save-credentials-btn:hover {
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 20px rgba(0, 255, 157, 0.4);
-                }
-
-                .security-note {
-                    text-align: center;
-                    font-size: 0.8rem;
-                    color: #5E6673;
-                    margin-top: 12px;
-                }
-
-                /* Connected Accounts */
-                .connected-accounts {
-                    margin-top: 10px;
+                    color: #EAECEF;
                 }
 
                 .section-header {
@@ -633,9 +474,127 @@ const Settings = ({ embedded = false, onClose }) => {
                     margin-bottom: 12px;
                 }
 
+                .section-header h4 {
+                    margin: 0;
+                }
+
+                /* Broker Buttons */
+                .broker-buttons {
+                    display: flex;
+                    gap: 10px;
+                    flex-wrap: wrap;
+                }
+
+                .broker-btn {
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 4px;
+                    padding: 14px 20px;
+                    background: rgba(30, 35, 50, 0.8);
+                    border: 2px solid rgba(255,255,255,0.1);
+                    border-radius: 10px;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                    min-width: 100px;
+                    color: #EAECEF;
+                    position: relative;
+                }
+
+                .broker-btn:hover:not(.disabled) {
+                    border-color: #00F0FF;
+                    background: rgba(0, 240, 255, 0.05);
+                }
+
+                .broker-btn.selected {
+                    border-color: #00F0FF;
+                    background: rgba(0, 240, 255, 0.1);
+                    box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
+                }
+
+                .broker-btn.disabled {
+                    opacity: 0.5;
+                    cursor: not-allowed;
+                }
+
+                .broker-icon { font-size: 1.3rem; }
+
+                .soon {
+                    position: absolute;
+                    top: -6px;
+                    right: -6px;
+                    background: #F0B90B;
+                    color: #000;
+                    font-size: 0.55rem;
+                    padding: 2px 5px;
+                    border-radius: 4px;
+                    font-weight: 700;
+                }
+
+                /* Credentials Form */
+                .credentials-form {
+                    background: rgba(0, 240, 255, 0.03);
+                    border-color: rgba(0, 240, 255, 0.2);
+                }
+
+                /* Form */
+                .form-group {
+                    margin-bottom: 14px;
+                }
+
+                .form-group label {
+                    display: block;
+                    font-size: 0.85rem;
+                    color: #EAECEF;
+                    margin-bottom: 6px;
+                }
+
+                .form-input {
+                    width: 100%;
+                    padding: 12px 14px;
+                    background: rgba(15, 20, 30, 0.8);
+                    border: 1px solid #00F0FF;
+                    border-radius: 8px;
+                    color: #EAECEF;
+                    font-size: 0.9rem;
+                    box-sizing: border-box;
+                }
+
+                .form-input::placeholder {
+                    color: #5E6673;
+                }
+
+                .form-input:focus {
+                    outline: none;
+                    box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+                }
+
+                .form-input option {
+                    background: #1a1d24;
+                }
+
+                .save-account-btn {
+                    width: 100%;
+                    padding: 12px;
+                    background: linear-gradient(135deg, #00F0FF, #00C4CC);
+                    color: #000;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 0.95rem;
+                    font-weight: 700;
+                    cursor: pointer;
+                    margin-top: 8px;
+                }
+
+                .save-account-btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 15px rgba(0, 240, 255, 0.4);
+                }
+
+                /* Refresh */
                 .refresh-btn {
                     background: rgba(99, 102, 241, 0.15);
-                    border: 1px solid rgba(99, 102, 241, 0.4);
+                    border: 1px solid rgba(99, 102, 241, 0.3);
                     color: #a5b4fc;
                     padding: 6px 12px;
                     border-radius: 6px;
@@ -643,38 +602,47 @@ const Settings = ({ embedded = false, onClose }) => {
                     cursor: pointer;
                 }
 
+                /* Accounts List */
                 .accounts-list {
                     display: flex;
                     flex-direction: column;
-                    gap: 12px;
+                    gap: 10px;
                 }
 
-                .loading-text { color: #00ff9d; text-align: center; padding: 20px; }
-                .empty-text { color: #5E6673; text-align: center; padding: 20px; }
+                .loading-text {
+                    color: #00F0FF;
+                    text-align: center;
+                    padding: 15px;
+                }
+
+                .empty-text {
+                    color: #5E6673;
+                    text-align: center;
+                    padding: 15px;
+                }
 
                 .account-card {
-                    background: rgba(0, 0, 0, 0.2);
-                    border: 1px solid rgba(255, 255, 255, 0.08);
-                    border-radius: 12px;
-                    padding: 16px;
-                    transition: all 0.2s;
+                    background: rgba(25, 30, 40, 0.8);
+                    border: 1px solid rgba(255,255,255,0.08);
+                    border-radius: 10px;
+                    padding: 12px;
                 }
 
                 .account-card.connected {
-                    border-color: rgba(0, 255, 157, 0.3);
+                    border-color: rgba(0, 240, 255, 0.3);
                 }
 
-                .account-header {
+                .account-row {
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
-                    margin-bottom: 12px;
+                    margin-bottom: 8px;
                 }
 
-                .broker-info {
+                .account-info {
                     display: flex;
-                    align-items: center;
                     gap: 10px;
+                    align-items: center;
                 }
 
                 .broker-badge {
@@ -682,34 +650,24 @@ const Settings = ({ embedded = false, onClose }) => {
                     color: #F0B90B;
                     padding: 4px 10px;
                     border-radius: 6px;
-                    font-size: 0.85rem;
+                    font-size: 0.8rem;
                     font-weight: 600;
                 }
 
-                .status-badge {
-                    font-size: 0.8rem;
-                    padding: 4px 10px;
-                    border-radius: 6px;
+                .status {
+                    font-size: 0.75rem;
                 }
 
-                .status-badge.connected {
-                    background: rgba(0, 255, 157, 0.1);
-                    color: #00ff9d;
-                }
-
-                .status-badge.disconnected {
-                    background: rgba(246, 70, 93, 0.1);
-                    color: #F6465D;
-                }
+                .status.connected { color: #00ff9d; }
+                .status.disconnected { color: #F6465D; }
 
                 .delete-btn {
                     background: none;
                     border: none;
-                    font-size: 1rem;
+                    font-size: 0.9rem;
                     cursor: pointer;
-                    padding: 6px;
+                    padding: 4px 8px;
                     border-radius: 6px;
-                    transition: all 0.2s;
                 }
 
                 .delete-btn:hover {
@@ -718,20 +676,15 @@ const Settings = ({ embedded = false, onClose }) => {
 
                 .account-details {
                     display: flex;
-                    flex-direction: column;
-                    gap: 6px;
-                    margin-bottom: 12px;
+                    gap: 20px;
+                    font-size: 0.8rem;
+                    color: #848E9C;
+                    margin-bottom: 10px;
                 }
 
-                .detail-row {
-                    display: flex;
-                    justify-content: space-between;
-                    font-size: 0.85rem;
+                .account-details b {
+                    color: #EAECEF;
                 }
-
-                .detail-row .label { color: #5E6673; }
-                .detail-row .value { color: #EAECEF; font-family: monospace; }
-                .detail-row .value.masked { color: #848E9C; }
 
                 .account-actions {
                     display: flex;
@@ -742,21 +695,19 @@ const Settings = ({ embedded = false, onClose }) => {
                     flex: 1;
                     padding: 10px;
                     border-radius: 8px;
-                    font-size: 0.9rem;
+                    font-size: 0.85rem;
                     font-weight: 600;
                     cursor: pointer;
-                    transition: all 0.2s;
                 }
 
                 .connect-btn {
-                    background: linear-gradient(135deg, #00ff9d, #00cc7d);
-                    color: #0A0B0D;
+                    background: linear-gradient(135deg, #00F0FF, #00C4CC);
+                    color: #000;
                     border: none;
                 }
 
                 .connect-btn:hover {
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 15px rgba(0, 255, 157, 0.4);
+                    box-shadow: 0 4px 15px rgba(0, 240, 255, 0.4);
                 }
 
                 .disconnect-btn {
@@ -765,41 +716,63 @@ const Settings = ({ embedded = false, onClose }) => {
                     color: #F6465D;
                 }
 
-                .disconnect-btn:hover {
-                    background: rgba(246, 70, 93, 0.2);
+                /* Footer */
+                .footer-actions {
+                    display: flex;
+                    justify-content: center;
+                    margin-top: 20px;
                 }
 
-                /* TOTP Modal */
-                .totp-modal-overlay {
+                .save-btn {
+                    background: linear-gradient(135deg, #F0B90B, #FFD700);
+                    color: #000;
+                    border: none;
+                    padding: 14px 40px;
+                    border-radius: 8px;
+                    font-size: 1rem;
+                    font-weight: 700;
+                    cursor: pointer;
+                }
+
+                .save-btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 20px rgba(240, 185, 11, 0.4);
+                }
+
+                /* Modal */
+                .modal-overlay {
                     position: fixed;
                     top: 0;
                     left: 0;
                     right: 0;
                     bottom: 0;
-                    background: rgba(0, 0, 0, 0.8);
+                    background: rgba(0, 0, 0, 0.85);
                     display: flex;
                     align-items: center;
                     justify-content: center;
                     z-index: 1000;
                 }
 
-                .totp-modal {
-                    background: linear-gradient(145deg, #1a1d24 0%, #0d0e12 100%);
-                    border: 1px solid rgba(255, 255, 255, 0.1);
+                .modal {
+                    background: linear-gradient(145deg, #1e2330 0%, #141820 100%);
+                    border: 1px solid rgba(0, 240, 255, 0.2);
                     border-radius: 16px;
-                    width: 380px;
+                    width: 360px;
                     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
                 }
 
-                .totp-header {
+                .modal-header {
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
-                    padding: 20px;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+                    padding: 18px 20px;
+                    border-bottom: 1px solid rgba(255,255,255,0.08);
                 }
 
-                .totp-header h3 { margin: 0; color: #EAECEF; }
+                .modal-header h3 {
+                    margin: 0;
+                    color: #EAECEF;
+                }
 
                 .close-btn {
                     background: none;
@@ -809,58 +782,57 @@ const Settings = ({ embedded = false, onClose }) => {
                     cursor: pointer;
                 }
 
-                .totp-body {
-                    padding: 25px 20px;
+                .modal-body {
+                    padding: 24px 20px;
                     text-align: center;
                 }
 
-                .totp-body p {
+                .modal-body p {
                     color: #848E9C;
-                    margin-bottom: 20px;
+                    margin-bottom: 18px;
                     font-size: 0.9rem;
                 }
 
                 .totp-input {
                     width: 100%;
                     padding: 16px;
-                    background: rgba(0, 0, 0, 0.3);
-                    border: 2px solid rgba(0, 255, 157, 0.3);
-                    border-radius: 12px;
-                    color: #00ff9d;
+                    background: rgba(15, 20, 30, 0.8);
+                    border: 2px solid #00F0FF;
+                    border-radius: 10px;
+                    color: #00F0FF;
                     font-size: 2rem;
                     font-family: monospace;
                     text-align: center;
-                    letter-spacing: 8px;
+                    letter-spacing: 10px;
+                    box-sizing: border-box;
                 }
 
                 .totp-input:focus {
                     outline: none;
-                    border-color: #00ff9d;
-                    box-shadow: 0 0 20px rgba(0, 255, 157, 0.3);
+                    box-shadow: 0 0 20px rgba(0, 240, 255, 0.3);
                 }
 
-                .error-message {
+                .error-text {
                     color: #F6465D;
                     font-size: 0.85rem;
                     margin-top: 12px;
                 }
 
-                .totp-footer {
-                    padding: 20px;
-                    border-top: 1px solid rgba(255, 255, 255, 0.08);
+                .modal-footer {
+                    padding: 18px 20px;
+                    border-top: 1px solid rgba(255,255,255,0.08);
                 }
 
                 .connect-totp-btn {
                     width: 100%;
                     padding: 14px;
-                    background: linear-gradient(135deg, #00ff9d, #00cc7d);
-                    color: #0A0B0D;
+                    background: linear-gradient(135deg, #00F0FF, #00C4CC);
+                    color: #000;
                     border: none;
                     border-radius: 10px;
                     font-size: 1rem;
                     font-weight: 700;
                     cursor: pointer;
-                    transition: all 0.2s;
                 }
 
                 .connect-totp-btn:disabled {
@@ -869,32 +841,7 @@ const Settings = ({ embedded = false, onClose }) => {
                 }
 
                 .connect-totp-btn:hover:not(:disabled) {
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 20px rgba(0, 255, 157, 0.5);
-                }
-
-                /* API Tab */
-                .save-btn {
-                    background: linear-gradient(135deg, #F0B90B, #FFD700);
-                    color: #0A0B0D;
-                    border: none;
-                    padding: 12px 30px;
-                    border-radius: 8px;
-                    font-size: 0.95rem;
-                    font-weight: 700;
-                    cursor: pointer;
-                    margin-top: 10px;
-                    align-self: flex-end;
-                }
-
-                .save-btn:hover {
-                    transform: translateY(-2px);
-                    box-shadow: 0 4px 15px rgba(240, 185, 11, 0.4);
-                }
-
-                .form-select option {
-                    background: #1a1d24;
-                    color: #EAECEF;
+                    box-shadow: 0 4px 20px rgba(0, 240, 255, 0.5);
                 }
             `}</style>
         </div>

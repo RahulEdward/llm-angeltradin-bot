@@ -86,8 +86,20 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
     const totalUnrealizedPnL = positions.reduce((sum, p) => sum + (p.pnl || 0), 0);
     const totalRealizedPnL = tradeRecords.reduce((sum, t) => sum + (t.pnl || 0), 0);
 
-    const toggleLLM = () => {
-        setLlmEnabled(!llmEnabled);
+    const [showAgentConfig, setShowAgentConfig] = useState(false);
+
+    const toggleLLM = async () => {
+        const newValue = !llmEnabled;
+        setLlmEnabled(newValue);
+        try {
+            await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ llm_enabled: newValue })
+            });
+        } catch (err) {
+            console.log('LLM toggle saved locally');
+        }
     };
 
     if (loading) {
@@ -206,7 +218,7 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                                     🤖 <span>{llmProvider}</span> (<span>{llmModel}</span>)
                                 </div>
                             )}
-                            <button className="llm-toggle-btn agent-config-btn">Agent Config</button>
+                            <button className="llm-toggle-btn agent-config-btn" onClick={() => setShowAgentConfig(true)}>Agent Config</button>
                             <button className="llm-toggle-btn" onClick={toggleLLM}>
                                 LLM: {llmEnabled ? 'ON' : 'OFF'}
                             </button>
@@ -326,6 +338,70 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                     </div>
                 </section>
             </div>
+
+            {/* Agent Config Modal */}
+            {showAgentConfig && (
+                <div className="agent-config-modal-overlay" onClick={() => setShowAgentConfig(false)}>
+                    <div className="agent-config-modal" onClick={e => e.stopPropagation()}>
+                        <div className="modal-header">
+                            <h3>🤖 Agent Configuration</h3>
+                            <button className="close-btn" onClick={() => setShowAgentConfig(false)}>×</button>
+                        </div>
+                        <div className="modal-body">
+                            <div className="agent-list">
+                                <div className="agent-item">
+                                    <span className="agent-icon">📊</span>
+                                    <div className="agent-info">
+                                        <span className="agent-name">Market Data Agent</span>
+                                        <span className="agent-desc">Fetches real-time quotes and indicators</span>
+                                    </div>
+                                    <span className="agent-status active">Active</span>
+                                </div>
+                                <div className="agent-item">
+                                    <span className="agent-icon">🧠</span>
+                                    <div className="agent-info">
+                                        <span className="agent-name">Strategy Agent</span>
+                                        <span className="agent-desc">4-layer filter + LLM analysis</span>
+                                    </div>
+                                    <span className="agent-status active">Active</span>
+                                </div>
+                                <div className="agent-item">
+                                    <span className="agent-icon">🛡️</span>
+                                    <div className="agent-info">
+                                        <span className="agent-name">Risk Manager Agent</span>
+                                        <span className="agent-desc">Position sizing, veto power, kill switch</span>
+                                    </div>
+                                    <span className="agent-status active">Active</span>
+                                </div>
+                                <div className="agent-item">
+                                    <span className="agent-icon">⚡</span>
+                                    <div className="agent-info">
+                                        <span className="agent-name">Execution Agent</span>
+                                        <span className="agent-desc">Order placement via broker</span>
+                                    </div>
+                                    <span className="agent-status active">Active</span>
+                                </div>
+                                <div className="agent-item">
+                                    <span className="agent-icon">👑</span>
+                                    <div className="agent-info">
+                                        <span className="agent-name">Supervisor Agent</span>
+                                        <span className="agent-desc">Orchestrates all agents</span>
+                                    </div>
+                                    <span className="agent-status active">Active</span>
+                                </div>
+                            </div>
+                            <div className="config-section">
+                                <h4>Trading Symbols</h4>
+                                <div className="symbols-list">
+                                    {['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'].map(s => (
+                                        <span key={s} className="symbol-tag">{s}</span>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <style>{`
                 /* Hero Layout - 3 Columns */
@@ -807,6 +883,131 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 .mini-records .badge.sell {
                     background: rgba(246, 70, 93, 0.2);
                     color: #F6465D;
+                }
+
+                /* Agent Config Modal */
+                .agent-config-modal-overlay {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background: rgba(0, 0, 0, 0.85);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 1000;
+                }
+
+                .agent-config-modal {
+                    background: linear-gradient(145deg, #1e2330 0%, #141820 100%);
+                    border: 1px solid rgba(186, 104, 200, 0.3);
+                    border-radius: 16px;
+                    width: 500px;
+                    max-width: 90vw;
+                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+                }
+
+                .agent-config-modal .modal-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    padding: 18px 24px;
+                    border-bottom: 1px solid rgba(255,255,255,0.08);
+                }
+
+                .agent-config-modal .modal-header h3 {
+                    margin: 0;
+                    color: #ba68c8;
+                    font-size: 1.1rem;
+                }
+
+                .agent-config-modal .close-btn {
+                    background: none;
+                    border: none;
+                    color: #848E9C;
+                    font-size: 1.5rem;
+                    cursor: pointer;
+                }
+
+                .agent-config-modal .close-btn:hover {
+                    color: #F6465D;
+                }
+
+                .agent-config-modal .modal-body {
+                    padding: 20px 24px;
+                }
+
+                .agent-list {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 12px;
+                    margin-bottom: 20px;
+                }
+
+                .agent-item {
+                    display: flex;
+                    align-items: center;
+                    gap: 14px;
+                    padding: 12px 16px;
+                    background: rgba(186, 104, 200, 0.08);
+                    border-radius: 10px;
+                    border: 1px solid rgba(186, 104, 200, 0.15);
+                }
+
+                .agent-icon {
+                    font-size: 1.5rem;
+                }
+
+                .agent-info {
+                    flex: 1;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 2px;
+                }
+
+                .agent-name {
+                    font-weight: 600;
+                    color: #EAECEF;
+                    font-size: 0.9rem;
+                }
+
+                .agent-desc {
+                    font-size: 0.75rem;
+                    color: #848E9C;
+                }
+
+                .agent-status {
+                    padding: 4px 10px;
+                    border-radius: 12px;
+                    font-size: 0.7rem;
+                    font-weight: 600;
+                }
+
+                .agent-status.active {
+                    background: rgba(14, 203, 129, 0.2);
+                    color: #0ECB81;
+                }
+
+                .config-section h4 {
+                    color: #F0B90B;
+                    font-size: 0.85rem;
+                    margin-bottom: 10px;
+                }
+
+                .symbols-list {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 8px;
+                }
+
+                .symbol-tag {
+                    background: rgba(240, 185, 11, 0.15);
+                    color: #F0B90B;
+                    padding: 6px 12px;
+                    border-radius: 6px;
+                    font-size: 0.8rem;
+                    font-weight: 600;
                 }
 
                 /* Responsive */
