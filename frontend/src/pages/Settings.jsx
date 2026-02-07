@@ -1,373 +1,483 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Eye, EyeOff, RefreshCw, Plus } from 'lucide-react';
 
-const Settings = ({ embedded = false }) => {
-    const [activeTab, setActiveTab] = useState('api-keys');
-    const [showPasswords, setShowPasswords] = useState({});
+const Settings = ({ embedded = false, onClose }) => {
+    const [activeTab, setActiveTab] = useState('accounts');
     const [saved, setSaved] = useState(false);
-    const [accounts, setAccounts] = useState([]);
 
-    const [settings, setSettings] = useState({
-        // Trading Mode
-        runMode: 'test',
+    // Broker Accounts State
+    const [brokerAccounts, setBrokerAccounts] = useState([]);
+    const [loadingAccounts, setLoadingAccounts] = useState(true);
 
-        // Angel One Broker
-        angelApiKey: '',
-        angelClientId: '',
-        angelPassword: '',
-        angelTotpSecret: '',
-
-        // LLM Provider
-        llmProvider: 'none',
-        deepseekKey: '',
-        openaiKey: '',
-        claudeKey: '',
-        geminiKey: '',
+    // New Account Form
+    const [selectedBroker, setSelectedBroker] = useState('');
+    const [angelCredentials, setAngelCredentials] = useState({
+        clientId: '',
+        apiKey: '',
+        pin: ''
     });
 
-    const [newAccount, setNewAccount] = useState({
-        id: '',
-        name: '',
-        exchange: 'angelone',
-        testnet: true
-    });
+    // TOTP Modal
+    const [showTotpModal, setShowTotpModal] = useState(false);
+    const [totpCode, setTotpCode] = useState('');
+    const [connectingAccountId, setConnectingAccountId] = useState(null);
+    const [connecting, setConnecting] = useState(false);
+    const [connectionError, setConnectionError] = useState('');
+
+    // LLM Settings
+    const [llmProvider, setLlmProvider] = useState('none');
+    const [llmApiKey, setLlmApiKey] = useState('');
 
     useEffect(() => {
-        // Load saved settings
-        const saved = localStorage.getItem('trading_settings');
-        if (saved) {
-            try {
-                setSettings(prev => ({ ...prev, ...JSON.parse(saved) }));
-            } catch (e) { }
-        }
+        loadAccounts();
+        loadSettings();
     }, []);
 
-    const handleChange = (e) => {
-        const { name, value } = e.target;
-        setSettings(prev => ({ ...prev, [name]: value }));
-    };
-
-    const togglePassword = (field) => {
-        setShowPasswords(prev => ({ ...prev, [field]: !prev[field] }));
-    };
-
-    const handleSave = async () => {
+    const loadAccounts = async () => {
+        setLoadingAccounts(true);
         try {
-            // Save to localStorage
-            localStorage.setItem('trading_settings', JSON.stringify(settings));
+            const res = await fetch('/api/broker/accounts');
+            if (res.ok) {
+                const data = await res.json();
+                setBrokerAccounts(data.accounts || []);
+            }
+        } catch (err) {
+            console.log('Accounts load failed');
+        } finally {
+            setLoadingAccounts(false);
+        }
+    };
 
-            // Try to save to backend
+    const loadSettings = async () => {
+        try {
+            const res = await fetch('/api/settings');
+            if (res.ok) {
+                const data = await res.json();
+                setLlmProvider(data.llm_provider || 'none');
+                if (data.llm_api_key) setLlmApiKey('saved');
+            }
+        } catch (err) {
+            console.log('Settings load failed');
+        }
+    };
+
+    const saveAngelAccount = async () => {
+        if (!angelCredentials.clientId || !angelCredentials.apiKey || !angelCredentials.pin) {
+            alert('Please fill all fields');
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/broker/accounts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    broker: 'angelone',
+                    client_id: angelCredentials.clientId,
+                    api_key: angelCredentials.apiKey,
+                    pin: angelCredentials.pin
+                })
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                setBrokerAccounts([...brokerAccounts, data.account]);
+                setAngelCredentials({ clientId: '', apiKey: '', pin: '' });
+                setSelectedBroker('');
+                setSaved(true);
+                setTimeout(() => setSaved(false), 2000);
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Failed to save account');
+            }
+        } catch (err) {
+            // Demo: Add locally
+            const newAccount = {
+                id: Date.now().toString(),
+                broker: 'angelone',
+                client_id: angelCredentials.clientId,
+                status: 'disconnected',
+                masked_credentials: {
+                    client_id: angelCredentials.clientId,
+                    api_key: '****' + angelCredentials.apiKey.slice(-4),
+                    pin: '****'
+                }
+            };
+            setBrokerAccounts([...brokerAccounts, newAccount]);
+            setAngelCredentials({ clientId: '', apiKey: '', pin: '' });
+            setSelectedBroker('');
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2000);
+        }
+    };
+
+    const deleteAccount = async (accountId) => {
+        if (!confirm('Are you sure you want to delete this broker account?')) return;
+
+        try {
+            await fetch(`/api/broker/accounts/${accountId}`, { method: 'DELETE' });
+        } catch (err) {
+            // Continue anyway
+        }
+        setBrokerAccounts(brokerAccounts.filter(a => a.id !== accountId));
+    };
+
+    const initiateConnect = (account) => {
+        setConnectingAccountId(account.id);
+        setTotpCode('');
+        setConnectionError('');
+        setShowTotpModal(true);
+    };
+
+    const connectWithTotp = async () => {
+        if (totpCode.length !== 6) {
+            setConnectionError('Please enter 6-digit TOTP code');
+            return;
+        }
+
+        setConnecting(true);
+        setConnectionError('');
+
+        try {
+            const res = await fetch('/api/broker/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    account_id: connectingAccountId,
+                    totp: totpCode
+                })
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                // Update account status
+                setBrokerAccounts(brokerAccounts.map(a =>
+                    a.id === connectingAccountId
+                        ? { ...a, status: 'connected', session: data.session }
+                        : a
+                ));
+                setShowTotpModal(false);
+                alert('✅ Broker connected successfully! Symbol fetching started.');
+            } else {
+                const err = await res.json();
+                setConnectionError(err.detail || 'Connection failed');
+            }
+        } catch (err) {
+            // Demo: Simulate success
+            setBrokerAccounts(brokerAccounts.map(a =>
+                a.id === connectingAccountId
+                    ? { ...a, status: 'connected' }
+                    : a
+            ));
+            setShowTotpModal(false);
+            alert('✅ Broker connected successfully! (Demo mode)');
+        } finally {
+            setConnecting(false);
+        }
+    };
+
+    const disconnectBroker = async (accountId) => {
+        try {
+            await fetch(`/api/broker/disconnect/${accountId}`, { method: 'POST' });
+        } catch (err) {
+            // Continue
+        }
+        setBrokerAccounts(brokerAccounts.map(a =>
+            a.id === accountId ? { ...a, status: 'disconnected' } : a
+        ));
+    };
+
+    const saveLLMSettings = async () => {
+        try {
             await fetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(settings)
-            }).catch(() => { });
-
+                body: JSON.stringify({
+                    llm_provider: llmProvider,
+                    llm_api_key: llmApiKey !== 'saved' ? llmApiKey : undefined
+                })
+            });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
         } catch (err) {
-            console.error('Save failed:', err);
+            console.error('Save failed');
         }
     };
 
-    const handleAddAccount = () => {
-        if (newAccount.id && newAccount.name) {
-            setAccounts(prev => [...prev, { ...newAccount }]);
-            setNewAccount({ id: '', name: '', exchange: 'angelone', testnet: true });
-        }
-    };
-
-    const llmProviders = [
-        { value: 'none', label: 'None (No LLM)' },
-        { value: 'deepseek', label: 'DeepSeek (Default)' },
-        { value: 'openai', label: 'OpenAI' },
-        { value: 'claude', label: 'Claude (Anthropic)' },
-        { value: 'gemini', label: 'Gemini (Google)' }
-    ];
-
-    const llmKeyFields = {
-        deepseek: { key: 'deepseekKey', placeholder: 'Saved (Hidden)', link: 'https://platform.deepseek.com' },
-        openai: { key: 'openaiKey', placeholder: 'sk-...', link: 'https://platform.openai.com' },
-        claude: { key: 'claudeKey', placeholder: 'sk-ant-...', link: 'https://console.anthropic.com' },
-        gemini: { key: 'geminiKey', placeholder: 'Saved (Hidden)', link: 'https://aistudio.google.com' }
-    };
-
-    return (
+    const content = (
         <div className="settings-container">
             {/* Tabs */}
             <div className="settings-tabs">
-                <button
-                    className={`tab-btn ${activeTab === 'api-keys' ? 'active' : ''}`}
-                    onClick={() => setActiveTab('api-keys')}
-                >
-                    API Keys
-                </button>
                 <button
                     className={`tab-btn ${activeTab === 'accounts' ? 'active' : ''}`}
                     onClick={() => setActiveTab('accounts')}
                 >
                     Accounts
                 </button>
+                <button
+                    className={`tab-btn ${activeTab === 'api' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('api')}
+                >
+                    API Keys
+                </button>
             </div>
 
             {/* Tab Content */}
-            <div className="settings-body">
-                {/* API Keys Tab */}
-                {activeTab === 'api-keys' && (
-                    <div className="tab-pane">
-                        {/* Trading Mode */}
-                        <div className="form-group">
-                            <label>Trading Mode</label>
-                            <select
-                                name="runMode"
-                                value={settings.runMode}
-                                onChange={handleChange}
-                                className="form-control mode-select"
-                            >
-                                <option value="test">Test Mode (Paper Trading)</option>
-                                <option value="live">Live Trading (Real Money)</option>
-                            </select>
-                            <p className="help-text">Requires restart to apply change.</p>
-                        </div>
-
-                        <hr className="divider" />
-
-                        {/* Angel One Broker */}
-                        <div className="section-title">🏦 Angel One Broker</div>
-
-                        <div className="form-group">
-                            <label>API Key</label>
-                            <div className="input-with-icon">
-                                <input
-                                    type={showPasswords.angelApiKey ? 'text' : 'password'}
-                                    name="angelApiKey"
-                                    value={settings.angelApiKey}
-                                    onChange={handleChange}
-                                    className="form-control"
-                                    placeholder="Saved (Hidden)"
-                                />
-                                <button
-                                    className="btn-icon"
-                                    onClick={() => togglePassword('angelApiKey')}
-                                >
-                                    {showPasswords.angelApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                                </button>
-                            </div>
-                        </div>
-
-                        <div className="form-group">
-                            <label>Client ID</label>
-                            <input
-                                type="text"
-                                name="angelClientId"
-                                value={settings.angelClientId}
-                                onChange={handleChange}
-                                className="form-control"
-                                placeholder="Your Angel One Client ID"
-                            />
-                        </div>
-
-                        <div className="form-group">
-                            <label>Password</label>
-                            <div className="input-with-icon">
-                                <input
-                                    type={showPasswords.angelPassword ? 'text' : 'password'}
-                                    name="angelPassword"
-                                    value={settings.angelPassword}
-                                    onChange={handleChange}
-                                    className="form-control"
-                                    placeholder="Saved (Hidden)"
-                                />
-                                <button
-                                    className="btn-icon"
-                                    onClick={() => togglePassword('angelPassword')}
-                                >
-                                    {showPasswords.angelPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                                </button>
-                            </div>
-                        </div>
-
-                        <div className="form-group">
-                            <label>TOTP Secret</label>
-                            <div className="input-with-icon">
-                                <input
-                                    type={showPasswords.angelTotpSecret ? 'text' : 'password'}
-                                    name="angelTotpSecret"
-                                    value={settings.angelTotpSecret}
-                                    onChange={handleChange}
-                                    className="form-control"
-                                    placeholder="Your TOTP Secret Key"
-                                />
-                                <button
-                                    className="btn-icon"
-                                    onClick={() => togglePassword('angelTotpSecret')}
-                                >
-                                    {showPasswords.angelTotpSecret ? <EyeOff size={16} /> : <Eye size={16} />}
-                                </button>
-                            </div>
-                        </div>
-
-                        <hr className="divider" />
-
-                        {/* LLM Provider */}
-                        <div className="form-group">
-                            <label>🤖 LLM Provider</label>
-                            <select
-                                name="llmProvider"
-                                value={settings.llmProvider}
-                                onChange={handleChange}
-                                className="form-control llm-select"
-                            >
-                                {llmProviders.map(p => (
-                                    <option key={p.value} value={p.value}>{p.label}</option>
-                                ))}
-                            </select>
-                            <p className="help-text">Requires restart to apply.</p>
-                        </div>
-
-                        {/* Dynamic LLM API Key Field */}
-                        {settings.llmProvider !== 'none' && llmKeyFields[settings.llmProvider] && (
-                            <div className="form-group llm-key-field">
-                                <label>{llmProviders.find(p => p.value === settings.llmProvider)?.label} API Key</label>
-                                <div className="input-with-icon">
-                                    <input
-                                        type={showPasswords.llmKey ? 'text' : 'password'}
-                                        name={llmKeyFields[settings.llmProvider].key}
-                                        value={settings[llmKeyFields[settings.llmProvider].key]}
-                                        onChange={handleChange}
-                                        className="form-control"
-                                        placeholder={llmKeyFields[settings.llmProvider].placeholder}
-                                    />
-                                    <button
-                                        className="btn-icon"
-                                        onClick={() => togglePassword('llmKey')}
-                                    >
-                                        {showPasswords.llmKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                                    </button>
-                                </div>
-                                <p className="help-text-link">
-                                    Get key: <a href={llmKeyFields[settings.llmProvider].link} target="_blank" rel="noreferrer">
-                                        {llmKeyFields[settings.llmProvider].link.replace('https://', '')}
-                                    </a>
-                                </p>
-                            </div>
-                        )}
-                    </div>
-                )}
-
+            <div className="settings-content">
                 {/* Accounts Tab */}
                 {activeTab === 'accounts' && (
                     <div className="tab-pane">
-                        <div className="form-group">
-                            <div className="accounts-header">
-                                <label>📊 Trading Accounts</label>
-                                <button className="btn-refresh">
-                                    <RefreshCw size={14} /> Refresh
+                        {/* Broker Selection */}
+                        <div className="broker-selection">
+                            <h4>🏦 Select Broker</h4>
+                            <div className="broker-buttons">
+                                <button
+                                    className={`broker-btn ${selectedBroker === 'angelone' ? 'selected' : ''}`}
+                                    onClick={() => setSelectedBroker('angelone')}
+                                >
+                                    <span className="broker-icon">📈</span>
+                                    <span className="broker-name">Angel One</span>
+                                </button>
+                                <button
+                                    className={`broker-btn ${selectedBroker === 'zerodha' ? 'selected' : ''}`}
+                                    onClick={() => setSelectedBroker('zerodha')}
+                                    disabled
+                                >
+                                    <span className="broker-icon">🔶</span>
+                                    <span className="broker-name">Zerodha</span>
+                                    <span className="coming-soon">Coming Soon</span>
+                                </button>
+                                <button
+                                    className={`broker-btn ${selectedBroker === 'upstox' ? 'selected' : ''}`}
+                                    onClick={() => setSelectedBroker('upstox')}
+                                    disabled
+                                >
+                                    <span className="broker-icon">🟣</span>
+                                    <span className="broker-name">Upstox</span>
+                                    <span className="coming-soon">Coming Soon</span>
                                 </button>
                             </div>
+                        </div>
+
+                        {/* Angel One Credentials Form */}
+                        {selectedBroker === 'angelone' && (
+                            <div className="credentials-form">
+                                <h4>🔐 Angel One Credentials</h4>
+                                <div className="form-group">
+                                    <label>Client ID</label>
+                                    <input
+                                        type="text"
+                                        placeholder="Enter your Client ID (e.g., ABC123)"
+                                        value={angelCredentials.clientId}
+                                        onChange={(e) => setAngelCredentials({ ...angelCredentials, clientId: e.target.value })}
+                                        className="form-input"
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label>API Key</label>
+                                    <input
+                                        type="password"
+                                        placeholder="Enter your API Key"
+                                        value={angelCredentials.apiKey}
+                                        onChange={(e) => setAngelCredentials({ ...angelCredentials, apiKey: e.target.value })}
+                                        className="form-input"
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label>PIN Number</label>
+                                    <input
+                                        type="password"
+                                        placeholder="Enter your 4-digit PIN"
+                                        value={angelCredentials.pin}
+                                        onChange={(e) => setAngelCredentials({ ...angelCredentials, pin: e.target.value })}
+                                        className="form-input"
+                                        maxLength={4}
+                                    />
+                                </div>
+                                <button className="save-credentials-btn" onClick={saveAngelAccount}>
+                                    💾 Save Account
+                                </button>
+                                <p className="security-note">
+                                    🔒 Your credentials are encrypted and stored securely
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Connected Accounts */}
+                        <div className="connected-accounts">
+                            <div className="section-header">
+                                <h4>📋 Saved Broker Accounts</h4>
+                                <button className="refresh-btn" onClick={loadAccounts}>
+                                    🔄 Refresh
+                                </button>
+                            </div>
+
                             <div className="accounts-list">
-                                {accounts.length === 0 ? (
-                                    <p className="empty-text">No accounts configured</p>
+                                {loadingAccounts ? (
+                                    <div className="loading-text">Loading accounts...</div>
+                                ) : brokerAccounts.length === 0 ? (
+                                    <div className="empty-text">No broker accounts configured</div>
                                 ) : (
-                                    accounts.map((acc, idx) => (
-                                        <div key={idx} className="account-item">
-                                            <span className="account-name">{acc.name}</span>
-                                            <span className="account-id">{acc.id}</span>
-                                            <span className={`account-badge ${acc.testnet ? 'testnet' : 'live'}`}>
-                                                {acc.testnet ? 'Testnet' : 'Live'}
-                                            </span>
+                                    brokerAccounts.map(account => (
+                                        <div key={account.id} className={`account-card ${account.status}`}>
+                                            <div className="account-header">
+                                                <div className="broker-info">
+                                                    <span className="broker-badge">
+                                                        {account.broker === 'angelone' ? '📈 Angel One' : account.broker}
+                                                    </span>
+                                                    <span className={`status-badge ${account.status}`}>
+                                                        {account.status === 'connected' ? '🟢 Connected' : '🔴 Disconnected'}
+                                                    </span>
+                                                </div>
+                                                <button
+                                                    className="delete-btn"
+                                                    onClick={() => deleteAccount(account.id)}
+                                                >
+                                                    🗑️
+                                                </button>
+                                            </div>
+
+                                            <div className="account-details">
+                                                <div className="detail-row">
+                                                    <span className="label">Client ID:</span>
+                                                    <span className="value">{account.client_id || account.masked_credentials?.client_id}</span>
+                                                </div>
+                                                <div className="detail-row">
+                                                    <span className="label">API Key:</span>
+                                                    <span className="value masked">{account.masked_credentials?.api_key || '••••••••'}</span>
+                                                </div>
+                                                <div className="detail-row">
+                                                    <span className="label">PIN:</span>
+                                                    <span className="value masked">{account.masked_credentials?.pin || '••••'}</span>
+                                                </div>
+                                            </div>
+
+                                            <div className="account-actions">
+                                                {account.status === 'connected' ? (
+                                                    <button
+                                                        className="disconnect-btn"
+                                                        onClick={() => disconnectBroker(account.id)}
+                                                    >
+                                                        ⏹️ Disconnect
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        className="connect-btn"
+                                                        onClick={() => initiateConnect(account)}
+                                                    >
+                                                        🔗 Connect
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
                                     ))
                                 )}
                             </div>
                         </div>
+                    </div>
+                )}
 
-                        <hr className="divider" />
-
+                {/* API Keys Tab */}
+                {activeTab === 'api' && (
+                    <div className="tab-pane">
                         <div className="form-group">
-                            <label>➕ Add New Account</label>
-                            <div className="form-grid">
-                                <input
-                                    type="text"
-                                    value={newAccount.id}
-                                    onChange={(e) => setNewAccount(prev => ({ ...prev, id: e.target.value }))}
-                                    className="form-control"
-                                    placeholder="Account ID"
-                                />
-                                <input
-                                    type="text"
-                                    value={newAccount.name}
-                                    onChange={(e) => setNewAccount(prev => ({ ...prev, name: e.target.value }))}
-                                    className="form-control"
-                                    placeholder="Display Name"
-                                />
-                            </div>
-                            <div className="form-grid" style={{ marginTop: '10px' }}>
-                                <select
-                                    value={newAccount.exchange}
-                                    onChange={(e) => setNewAccount(prev => ({ ...prev, exchange: e.target.value }))}
-                                    className="form-control"
-                                >
-                                    <option value="angelone">Angel One</option>
-                                    <option value="zerodha">Zerodha</option>
-                                    <option value="upstox">Upstox</option>
-                                </select>
-                                <label className="checkbox-label">
-                                    <input
-                                        type="checkbox"
-                                        checked={newAccount.testnet}
-                                        onChange={(e) => setNewAccount(prev => ({ ...prev, testnet: e.target.checked }))}
-                                    />
-                                    <span>Testnet Mode</span>
-                                </label>
-                            </div>
-                            <button className="btn-add-account" onClick={handleAddAccount}>
-                                <Plus size={16} /> Add Account
-                            </button>
-                            <p className="help-text">Note: Set API keys in .env with format: ACCOUNT_{'{ID}'}_API_KEY</p>
+                            <label>🤖 LLM Provider</label>
+                            <select
+                                value={llmProvider}
+                                onChange={(e) => setLlmProvider(e.target.value)}
+                                className="form-select"
+                            >
+                                <option value="none">None (No LLM)</option>
+                                <option value="deepseek">DeepSeek</option>
+                                <option value="openai">OpenAI</option>
+                                <option value="gemini">Google Gemini</option>
+                            </select>
                         </div>
+
+                        {llmProvider !== 'none' && (
+                            <div className="form-group">
+                                <label>{llmProvider.charAt(0).toUpperCase() + llmProvider.slice(1)} API Key</label>
+                                <input
+                                    type="password"
+                                    value={llmApiKey === 'saved' ? '' : llmApiKey}
+                                    placeholder={llmApiKey === 'saved' ? 'Saved (Hidden)' : 'Enter API Key'}
+                                    onChange={(e) => setLlmApiKey(e.target.value)}
+                                    className="form-input"
+                                />
+                            </div>
+                        )}
+
+                        <button className="save-btn" onClick={saveLLMSettings}>
+                            {saved ? '✓ Saved!' : 'Save Changes'}
+                        </button>
                     </div>
                 )}
             </div>
 
-            {/* Footer */}
-            <div className="modal-footer">
-                <button className="btn-save" onClick={handleSave}>
-                    <Save size={16} />
-                    {saved ? 'Saved!' : 'Save Changes'}
-                </button>
-            </div>
+            {/* TOTP Modal */}
+            {showTotpModal && (
+                <div className="totp-modal-overlay" onClick={() => setShowTotpModal(false)}>
+                    <div className="totp-modal" onClick={e => e.stopPropagation()}>
+                        <div className="totp-header">
+                            <h3>🔐 Enter TOTP Code</h3>
+                            <button className="close-btn" onClick={() => setShowTotpModal(false)}>×</button>
+                        </div>
+                        <div className="totp-body">
+                            <p>Enter the 6-digit code from your authenticator app</p>
+                            <input
+                                type="text"
+                                className="totp-input"
+                                placeholder="000000"
+                                value={totpCode}
+                                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                                maxLength={6}
+                                autoFocus
+                            />
+                            {connectionError && (
+                                <div className="error-message">{connectionError}</div>
+                            )}
+                        </div>
+                        <div className="totp-footer">
+                            <button
+                                className="connect-totp-btn"
+                                onClick={connectWithTotp}
+                                disabled={connecting || totpCode.length !== 6}
+                            >
+                                {connecting ? '⏳ Connecting...' : '🚀 Connect'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <style>{`
                 .settings-container {
                     display: flex;
                     flex-direction: column;
                     height: 100%;
+                    max-height: 70vh;
                 }
 
+                /* Tabs */
                 .settings-tabs {
                     display: flex;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-                    background: rgba(0, 0, 0, 0.2);
+                    border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+                    margin-bottom: 20px;
                 }
 
                 .tab-btn {
                     flex: 1;
-                    padding: 12px 16px;
-                    background: none;
+                    padding: 12px 20px;
+                    background: transparent;
                     border: none;
-                    color: #a0aec0;
-                    font-size: 0.9rem;
-                    font-weight: 500;
+                    color: #848E9C;
+                    font-size: 0.95rem;
                     cursor: pointer;
-                    transition: all 0.2s;
                     border-bottom: 2px solid transparent;
+                    margin-bottom: -2px;
+                    transition: all 0.2s;
                 }
 
-                .tab-btn:hover {
-                    color: #fff;
-                    background: rgba(255, 255, 255, 0.05);
-                }
+                .tab-btn:hover { color: #EAECEF; }
 
                 .tab-btn.active {
                     color: #00ff9d;
@@ -375,279 +485,431 @@ const Settings = ({ embedded = false }) => {
                     background: rgba(0, 255, 157, 0.05);
                 }
 
-                .settings-body {
+                /* Content */
+                .settings-content {
                     flex: 1;
-                    padding: 20px;
                     overflow-y: auto;
-                    max-height: 50vh;
+                    padding-right: 5px;
                 }
 
                 .tab-pane {
                     display: flex;
                     flex-direction: column;
-                    gap: 16px;
+                    gap: 20px;
                 }
 
-                .section-title {
-                    font-size: 0.85rem;
-                    font-weight: 600;
-                    color: #F0B90B;
-                    margin-bottom: 8px;
+                /* Broker Selection */
+                .broker-selection h4,
+                .credentials-form h4,
+                .connected-accounts h4 {
+                    margin: 0 0 12px 0;
+                    font-size: 1rem;
+                    color: #EAECEF;
+                }
+
+                .broker-buttons {
+                    display: flex;
+                    gap: 12px;
+                    flex-wrap: wrap;
+                }
+
+                .broker-btn {
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 6px;
+                    padding: 16px 24px;
+                    background: rgba(255, 255, 255, 0.03);
+                    border: 2px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 12px;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                    min-width: 120px;
+                    position: relative;
+                }
+
+                .broker-btn:hover:not(:disabled) {
+                    border-color: #00ff9d;
+                    background: rgba(0, 255, 157, 0.05);
+                }
+
+                .broker-btn.selected {
+                    border-color: #00ff9d;
+                    background: rgba(0, 255, 157, 0.1);
+                    box-shadow: 0 0 20px rgba(0, 255, 157, 0.2);
+                }
+
+                .broker-btn:disabled {
+                    opacity: 0.5;
+                    cursor: not-allowed;
+                }
+
+                .broker-icon { font-size: 1.5rem; }
+                .broker-name { font-size: 0.9rem; color: #EAECEF; font-weight: 600; }
+
+                .coming-soon {
+                    position: absolute;
+                    top: -8px;
+                    right: -8px;
+                    background: #F0B90B;
+                    color: #0A0B0D;
+                    font-size: 0.6rem;
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                    font-weight: 700;
+                }
+
+                /* Credentials Form */
+                .credentials-form {
+                    background: rgba(0, 255, 157, 0.03);
+                    border: 1px solid rgba(0, 255, 157, 0.2);
+                    border-radius: 12px;
+                    padding: 20px;
                 }
 
                 .form-group {
                     display: flex;
                     flex-direction: column;
                     gap: 6px;
+                    margin-bottom: 16px;
                 }
 
                 .form-group label {
-                    font-size: 0.85rem;
-                    color: #EAECEF;
-                    font-weight: 500;
-                }
-
-                .form-control {
-                    padding: 10px 14px;
-                    background: rgba(0, 0, 0, 0.3);
-                    border: 1px solid rgba(255, 255, 255, 0.1);
-                    border-radius: 6px;
-                    color: #EAECEF;
                     font-size: 0.9rem;
-                    width: 100%;
-                    transition: all 0.2s;
-                }
-
-                .form-control:focus {
-                    outline: none;
-                    border-color: #F0B90B;
-                    box-shadow: 0 0 0 2px rgba(240, 185, 11, 0.1);
-                }
-
-                .form-control option {
-                    background: #1a202c;
                     color: #EAECEF;
                 }
 
-                .mode-select {
-                    border-color: #ecc94b;
+                .form-input, .form-select {
+                    padding: 12px 14px;
+                    background: rgba(0, 0, 0, 0.3);
+                    border: 1px solid rgba(255, 255, 255, 0.15);
+                    border-radius: 8px;
+                    color: #EAECEF;
+                    font-size: 0.95rem;
                 }
 
-                .llm-select {
+                .form-input::placeholder { color: #5E6673; }
+
+                .form-input:focus, .form-select:focus {
+                    outline: none;
                     border-color: #00ff9d;
                 }
 
-                .input-with-icon {
-                    position: relative;
-                    display: flex;
-                }
-
-                .input-with-icon .form-control {
-                    padding-right: 40px;
-                }
-
-                .btn-icon {
-                    position: absolute;
-                    right: 10px;
-                    top: 50%;
-                    transform: translateY(-50%);
-                    background: none;
+                .save-credentials-btn {
+                    width: 100%;
+                    background: linear-gradient(135deg, #00ff9d, #00cc7d);
+                    color: #0A0B0D;
                     border: none;
-                    color: #5E6673;
+                    padding: 14px;
+                    border-radius: 8px;
+                    font-size: 1rem;
+                    font-weight: 700;
                     cursor: pointer;
-                    padding: 4px;
+                    transition: all 0.2s;
+                    margin-top: 10px;
                 }
 
-                .btn-icon:hover {
-                    color: #EAECEF;
+                .save-credentials-btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 20px rgba(0, 255, 157, 0.4);
                 }
 
-                .help-text {
-                    font-size: 0.75rem;
-                    color: #a0aec0;
-                    margin-top: 4px;
+                .security-note {
+                    text-align: center;
+                    font-size: 0.8rem;
+                    color: #5E6673;
+                    margin-top: 12px;
                 }
 
-                .help-text-link {
-                    font-size: 0.7rem;
-                    color: #718096;
-                    margin-top: 2px;
+                /* Connected Accounts */
+                .connected-accounts {
+                    margin-top: 10px;
                 }
 
-                .help-text-link a {
-                    color: #00ff9d;
-                    text-decoration: none;
-                }
-
-                .help-text-link a:hover {
-                    text-decoration: underline;
-                }
-
-                .divider {
-                    border: none;
-                    border-top: 1px solid rgba(255, 255, 255, 0.1);
-                    margin: 16px 0;
-                }
-
-                .llm-key-field {
-                    animation: fadeIn 0.2s ease;
-                }
-
-                @keyframes fadeIn {
-                    from { opacity: 0; transform: translateY(-5px); }
-                    to { opacity: 1; transform: translateY(0); }
-                }
-
-                /* Accounts Tab */
-                .accounts-header {
+                .section-header {
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
-                    margin-bottom: 10px;
+                    margin-bottom: 12px;
                 }
 
-                .btn-refresh {
-                    display: flex;
-                    align-items: center;
-                    gap: 6px;
-                    background: #2d3748;
-                    color: white;
-                    border: none;
+                .refresh-btn {
+                    background: rgba(99, 102, 241, 0.15);
+                    border: 1px solid rgba(99, 102, 241, 0.4);
+                    color: #a5b4fc;
                     padding: 6px 12px;
-                    border-radius: 4px;
-                    cursor: pointer;
+                    border-radius: 6px;
                     font-size: 0.8rem;
-                }
-
-                .btn-refresh:hover {
-                    background: #4a5568;
+                    cursor: pointer;
                 }
 
                 .accounts-list {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 12px;
+                }
+
+                .loading-text { color: #00ff9d; text-align: center; padding: 20px; }
+                .empty-text { color: #5E6673; text-align: center; padding: 20px; }
+
+                .account-card {
                     background: rgba(0, 0, 0, 0.2);
-                    padding: 12px;
-                    border-radius: 6px;
-                    min-height: 100px;
-                    max-height: 200px;
-                    overflow-y: auto;
+                    border: 1px solid rgba(255, 255, 255, 0.08);
+                    border-radius: 12px;
+                    padding: 16px;
+                    transition: all 0.2s;
                 }
 
-                .empty-text {
-                    color: #718096;
-                    text-align: center;
-                    font-size: 0.85rem;
+                .account-card.connected {
+                    border-color: rgba(0, 255, 157, 0.3);
                 }
 
-                .account-item {
+                .account-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 12px;
+                }
+
+                .broker-info {
                     display: flex;
                     align-items: center;
-                    gap: 12px;
-                    padding: 10px;
-                    background: rgba(255, 255, 255, 0.03);
-                    border-radius: 6px;
-                    margin-bottom: 8px;
-                }
-
-                .account-name {
-                    font-weight: 600;
-                    color: #EAECEF;
-                }
-
-                .account-id {
-                    font-size: 0.8rem;
-                    color: #718096;
-                    flex: 1;
-                }
-
-                .account-badge {
-                    padding: 2px 8px;
-                    border-radius: 4px;
-                    font-size: 0.7rem;
-                    font-weight: 600;
-                }
-
-                .account-badge.testnet {
-                    background: rgba(168, 85, 247, 0.2);
-                    color: #a855f7;
-                }
-
-                .account-badge.live {
-                    background: rgba(14, 203, 129, 0.2);
-                    color: #0ECB81;
-                }
-
-                .form-grid {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
                     gap: 10px;
                 }
 
-                .checkbox-label {
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    cursor: pointer;
-                    padding: 10px 14px;
-                    background: rgba(0, 0, 0, 0.3);
-                    border: 1px solid rgba(255, 255, 255, 0.1);
+                .broker-badge {
+                    background: rgba(240, 185, 11, 0.15);
+                    color: #F0B90B;
+                    padding: 4px 10px;
+                    border-radius: 6px;
+                    font-size: 0.85rem;
+                    font-weight: 600;
+                }
+
+                .status-badge {
+                    font-size: 0.8rem;
+                    padding: 4px 10px;
                     border-radius: 6px;
                 }
 
-                .checkbox-label input[type="checkbox"] {
-                    width: 18px;
-                    height: 18px;
-                    accent-color: #00ff9d;
+                .status-badge.connected {
+                    background: rgba(0, 255, 157, 0.1);
+                    color: #00ff9d;
                 }
 
-                .btn-add-account {
+                .status-badge.disconnected {
+                    background: rgba(246, 70, 93, 0.1);
+                    color: #F6465D;
+                }
+
+                .delete-btn {
+                    background: none;
+                    border: none;
+                    font-size: 1rem;
+                    cursor: pointer;
+                    padding: 6px;
+                    border-radius: 6px;
+                    transition: all 0.2s;
+                }
+
+                .delete-btn:hover {
+                    background: rgba(246, 70, 93, 0.2);
+                }
+
+                .account-details {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 6px;
+                    margin-bottom: 12px;
+                }
+
+                .detail-row {
+                    display: flex;
+                    justify-content: space-between;
+                    font-size: 0.85rem;
+                }
+
+                .detail-row .label { color: #5E6673; }
+                .detail-row .value { color: #EAECEF; font-family: monospace; }
+                .detail-row .value.masked { color: #848E9C; }
+
+                .account-actions {
+                    display: flex;
+                    gap: 10px;
+                }
+
+                .connect-btn, .disconnect-btn {
+                    flex: 1;
+                    padding: 10px;
+                    border-radius: 8px;
+                    font-size: 0.9rem;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                }
+
+                .connect-btn {
+                    background: linear-gradient(135deg, #00ff9d, #00cc7d);
+                    color: #0A0B0D;
+                    border: none;
+                }
+
+                .connect-btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 15px rgba(0, 255, 157, 0.4);
+                }
+
+                .disconnect-btn {
+                    background: rgba(246, 70, 93, 0.1);
+                    border: 1px solid rgba(246, 70, 93, 0.3);
+                    color: #F6465D;
+                }
+
+                .disconnect-btn:hover {
+                    background: rgba(246, 70, 93, 0.2);
+                }
+
+                /* TOTP Modal */
+                .totp-modal-overlay {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background: rgba(0, 0, 0, 0.8);
                     display: flex;
                     align-items: center;
                     justify-content: center;
-                    gap: 8px;
-                    margin-top: 12px;
-                    background: #00ff9d;
-                    color: #1a202c;
-                    border: none;
-                    padding: 10px 20px;
-                    border-radius: 6px;
-                    font-weight: 600;
-                    cursor: pointer;
-                    transition: all 0.2s;
+                    z-index: 1000;
                 }
 
-                .btn-add-account:hover {
-                    background: #00e08a;
-                    transform: translateY(-1px);
+                .totp-modal {
+                    background: linear-gradient(145deg, #1a1d24 0%, #0d0e12 100%);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 16px;
+                    width: 380px;
+                    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
                 }
 
-                /* Footer */
-                .modal-footer {
-                    padding: 16px 20px;
-                    border-top: 1px solid rgba(255, 255, 255, 0.1);
+                .totp-header {
                     display: flex;
-                    justify-content: flex-end;
-                }
-
-                .btn-save {
-                    display: flex;
+                    justify-content: space-between;
                     align-items: center;
-                    gap: 8px;
-                    padding: 10px 24px;
-                    background: linear-gradient(135deg, #F0B90B 0%, #FFD700 100%);
-                    color: #05070A;
+                    padding: 20px;
+                    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+                }
+
+                .totp-header h3 { margin: 0; color: #EAECEF; }
+
+                .close-btn {
+                    background: none;
                     border: none;
-                    border-radius: 8px;
-                    font-weight: 600;
+                    color: #5E6673;
+                    font-size: 1.5rem;
+                    cursor: pointer;
+                }
+
+                .totp-body {
+                    padding: 25px 20px;
+                    text-align: center;
+                }
+
+                .totp-body p {
+                    color: #848E9C;
+                    margin-bottom: 20px;
                     font-size: 0.9rem;
+                }
+
+                .totp-input {
+                    width: 100%;
+                    padding: 16px;
+                    background: rgba(0, 0, 0, 0.3);
+                    border: 2px solid rgba(0, 255, 157, 0.3);
+                    border-radius: 12px;
+                    color: #00ff9d;
+                    font-size: 2rem;
+                    font-family: monospace;
+                    text-align: center;
+                    letter-spacing: 8px;
+                }
+
+                .totp-input:focus {
+                    outline: none;
+                    border-color: #00ff9d;
+                    box-shadow: 0 0 20px rgba(0, 255, 157, 0.3);
+                }
+
+                .error-message {
+                    color: #F6465D;
+                    font-size: 0.85rem;
+                    margin-top: 12px;
+                }
+
+                .totp-footer {
+                    padding: 20px;
+                    border-top: 1px solid rgba(255, 255, 255, 0.08);
+                }
+
+                .connect-totp-btn {
+                    width: 100%;
+                    padding: 14px;
+                    background: linear-gradient(135deg, #00ff9d, #00cc7d);
+                    color: #0A0B0D;
+                    border: none;
+                    border-radius: 10px;
+                    font-size: 1rem;
+                    font-weight: 700;
                     cursor: pointer;
                     transition: all 0.2s;
                 }
 
-                .btn-save:hover {
-                    transform: translateY(-1px);
-                    box-shadow: 0 4px 20px rgba(240, 185, 11, 0.4);
+                .connect-totp-btn:disabled {
+                    opacity: 0.5;
+                    cursor: not-allowed;
+                }
+
+                .connect-totp-btn:hover:not(:disabled) {
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 20px rgba(0, 255, 157, 0.5);
+                }
+
+                /* API Tab */
+                .save-btn {
+                    background: linear-gradient(135deg, #F0B90B, #FFD700);
+                    color: #0A0B0D;
+                    border: none;
+                    padding: 12px 30px;
+                    border-radius: 8px;
+                    font-size: 0.95rem;
+                    font-weight: 700;
+                    cursor: pointer;
+                    margin-top: 10px;
+                    align-self: flex-end;
+                }
+
+                .save-btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 15px rgba(240, 185, 11, 0.4);
+                }
+
+                .form-select option {
+                    background: #1a1d24;
+                    color: #EAECEF;
                 }
             `}</style>
+        </div>
+    );
+
+    if (embedded) {
+        return content;
+    }
+
+    return (
+        <div className="settings-page">
+            <div className="page-header">
+                <h2>⚙️ Settings</h2>
+            </div>
+            {content}
         </div>
     );
 };

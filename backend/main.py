@@ -520,3 +520,347 @@ async def get_funds():
         raise HTTPException(status_code=503, detail="Broker not connected")
     
     return await broker.get_funds()
+
+
+# ============================================
+# Broker Account Management
+# ============================================
+
+import json
+import base64
+from pathlib import Path
+from cryptography.fernet import Fernet
+import hashlib
+
+# Generate or load encryption key
+BROKER_DATA_FILE = Path(__file__).parent / "data" / "broker_accounts.json"
+ENCRYPTION_KEY_FILE = Path(__file__).parent / "data" / ".encryption_key"
+
+def get_encryption_key():
+    """Get or create encryption key."""
+    ENCRYPTION_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if ENCRYPTION_KEY_FILE.exists():
+        return ENCRYPTION_KEY_FILE.read_bytes()
+    key = Fernet.generate_key()
+    ENCRYPTION_KEY_FILE.write_bytes(key)
+    return key
+
+def encrypt_value(value: str) -> str:
+    """Encrypt a string value."""
+    f = Fernet(get_encryption_key())
+    return f.encrypt(value.encode()).decode()
+
+def decrypt_value(encrypted: str) -> str:
+    """Decrypt an encrypted value."""
+    f = Fernet(get_encryption_key())
+    return f.decrypt(encrypted.encode()).decode()
+
+def load_broker_accounts():
+    """Load broker accounts from file."""
+    if not BROKER_DATA_FILE.exists():
+        return []
+    try:
+        return json.loads(BROKER_DATA_FILE.read_text())
+    except:
+        return []
+
+def save_broker_accounts(accounts: list):
+    """Save broker accounts to file."""
+    BROKER_DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BROKER_DATA_FILE.write_text(json.dumps(accounts, indent=2))
+
+# In-memory connected sessions
+connected_brokers: Dict[str, Any] = {}
+
+
+class BrokerAccountRequest(BaseModel):
+    broker: str
+    client_id: str
+    api_key: str
+    pin: str
+
+
+class BrokerConnectRequest(BaseModel):
+    account_id: str
+    totp: str
+
+
+@app.get("/api/broker/accounts")
+async def get_broker_accounts():
+    """Get all saved broker accounts."""
+    accounts = load_broker_accounts()
+    
+    # Return with masked credentials
+    safe_accounts = []
+    for acc in accounts:
+        safe_acc = {
+            "id": acc["id"],
+            "broker": acc["broker"],
+            "client_id": acc["client_id"],
+            "status": "connected" if acc["id"] in connected_brokers else "disconnected",
+            "masked_credentials": {
+                "client_id": acc["client_id"],
+                "api_key": "••••" + acc.get("api_key_last4", ""),
+                "pin": "••••"
+            },
+            "created_at": acc.get("created_at")
+        }
+        safe_accounts.append(safe_acc)
+    
+    return {"accounts": safe_accounts}
+
+
+@app.post("/api/broker/accounts")
+async def save_broker_account(request: BrokerAccountRequest):
+    """Save broker account with encrypted credentials."""
+    accounts = load_broker_accounts()
+    
+    # Check if account already exists
+    for acc in accounts:
+        if acc["client_id"] == request.client_id and acc["broker"] == request.broker:
+            raise HTTPException(status_code=400, detail="Account already exists")
+    
+    # Create new account with encrypted credentials
+    account_id = f"{request.broker}_{request.client_id}_{int(datetime.now().timestamp())}"
+    
+    new_account = {
+        "id": account_id,
+        "broker": request.broker,
+        "client_id": request.client_id,
+        "api_key_encrypted": encrypt_value(request.api_key),
+        "api_key_last4": request.api_key[-4:] if len(request.api_key) >= 4 else "",
+        "pin_encrypted": encrypt_value(request.pin),
+        "created_at": datetime.now().isoformat()
+    }
+    
+    accounts.append(new_account)
+    save_broker_accounts(accounts)
+    
+    logger.info(f"Saved broker account: {request.broker} - {request.client_id}")
+    
+    return {
+        "success": True,
+        "account": {
+            "id": account_id,
+            "broker": request.broker,
+            "client_id": request.client_id,
+            "status": "disconnected",
+            "masked_credentials": {
+                "client_id": request.client_id,
+                "api_key": "••••" + new_account["api_key_last4"],
+                "pin": "••••"
+            }
+        }
+    }
+
+
+@app.delete("/api/broker/accounts/{account_id}")
+async def delete_broker_account(account_id: str):
+    """Delete a broker account."""
+    accounts = load_broker_accounts()
+    accounts = [a for a in accounts if a["id"] != account_id]
+    save_broker_accounts(accounts)
+    
+    # Disconnect if connected
+    if account_id in connected_brokers:
+        del connected_brokers[account_id]
+    
+    return {"success": True}
+
+
+@app.post("/api/broker/connect")
+async def connect_broker(request: BrokerConnectRequest):
+    """Connect to broker using TOTP."""
+    accounts = load_broker_accounts()
+    
+    # Find account
+    account = None
+    for acc in accounts:
+        if acc["id"] == request.account_id:
+            account = acc
+            break
+    
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    # Decrypt credentials
+    try:
+        api_key = decrypt_value(account["api_key_encrypted"])
+        pin = decrypt_value(account["pin_encrypted"])
+    except Exception as e:
+        logger.error(f"Decryption failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to decrypt credentials")
+    
+    # Connect to Angel One
+    if account["broker"] == "angelone":
+        try:
+            from SmartApi import SmartConnect
+            
+            smart_api = SmartConnect(api_key=api_key)
+            
+            # Generate session with TOTP
+            session = smart_api.generateSession(
+                clientCode=account["client_id"],
+                password=pin,
+                totp=request.totp
+            )
+            
+            if session.get("status") == False:
+                raise HTTPException(
+                    status_code=401, 
+                    detail=session.get("message", "Login failed")
+                )
+            
+            # Store connected session
+            connected_brokers[request.account_id] = {
+                "smart_api": smart_api,
+                "session": session,
+                "connected_at": datetime.now().isoformat()
+            }
+            
+            logger.info(f"Broker connected: {account['client_id']}")
+            
+            # Start symbol fetching in background
+            asyncio.create_task(fetch_symbols_background(request.account_id))
+            
+            return {
+                "success": True,
+                "message": "Connected successfully",
+                "session": {
+                    "feed_token": session.get("data", {}).get("feedToken"),
+                    "refresh_token": session.get("data", {}).get("refreshToken")
+                }
+            }
+            
+        except ImportError:
+            # SmartApi not installed - demo mode
+            logger.warning("SmartApi not installed, using demo mode")
+            connected_brokers[request.account_id] = {
+                "demo": True,
+                "connected_at": datetime.now().isoformat()
+            }
+            return {
+                "success": True,
+                "message": "Connected (Demo Mode)",
+                "session": {"demo": True}
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+            raise HTTPException(status_code=401, detail=str(e))
+    
+    raise HTTPException(status_code=400, detail="Unsupported broker")
+
+
+@app.post("/api/broker/disconnect/{account_id}")
+async def disconnect_broker(account_id: str):
+    """Disconnect broker session."""
+    if account_id in connected_brokers:
+        broker_data = connected_brokers[account_id]
+        
+        if not broker_data.get("demo") and "smart_api" in broker_data:
+            try:
+                broker_data["smart_api"].terminateSession(
+                    broker_data["session"]["data"]["clientId"]
+                )
+            except:
+                pass
+        
+        del connected_brokers[account_id]
+        logger.info(f"Broker disconnected: {account_id}")
+    
+    return {"success": True}
+
+
+async def fetch_symbols_background(account_id: str):
+    """Fetch symbols in background after connection."""
+    try:
+        if account_id not in connected_brokers:
+            return
+        
+        broker_data = connected_brokers[account_id]
+        
+        if broker_data.get("demo"):
+            # Demo: Create sample symbols
+            logger.info("Using demo symbol data")
+            return
+        
+        smart_api = broker_data.get("smart_api")
+        if not smart_api:
+            return
+        
+        # Fetch instrument list
+        import requests
+        
+        instruments_url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+        response = requests.get(instruments_url, timeout=30)
+        
+        if response.ok:
+            instruments = response.json()
+            
+            # Filter NSE equity symbols
+            nse_symbols = [
+                {
+                    "token": inst["token"],
+                    "symbol": inst["symbol"],
+                    "name": inst["name"],
+                    "exchange": inst["exch_seg"]
+                }
+                for inst in instruments
+                if inst.get("exch_seg") == "NSE" and inst.get("instrumenttype") == "EQ"
+            ][:500]  # Limit to 500 for performance
+            
+            # Save to file
+            symbols_file = Path(__file__).parent / "data" / "symbols.json"
+            symbols_file.parent.mkdir(parents=True, exist_ok=True)
+            symbols_file.write_text(json.dumps(nse_symbols, indent=2))
+            
+            logger.info(f"Fetched {len(nse_symbols)} symbols")
+            
+    except Exception as e:
+        logger.error(f"Symbol fetch failed: {e}")
+
+
+@app.get("/api/broker/symbols")
+async def get_symbols():
+    """Get available symbols."""
+    symbols_file = Path(__file__).parent / "data" / "symbols.json"
+    
+    if symbols_file.exists():
+        try:
+            return {"symbols": json.loads(symbols_file.read_text())}
+        except:
+            pass
+    
+    # Return default symbols
+    return {
+        "symbols": [
+            {"token": "2885", "symbol": "RELIANCE", "name": "RELIANCE INDUSTRIES", "exchange": "NSE"},
+            {"token": "1594", "symbol": "INFY", "name": "INFOSYS LTD", "exchange": "NSE"},
+            {"token": "11536", "symbol": "TCS", "name": "TATA CONSULTANCY SERVICES", "exchange": "NSE"},
+            {"token": "1333", "symbol": "HDFCBANK", "name": "HDFC BANK LTD", "exchange": "NSE"},
+            {"token": "4963", "symbol": "ICICIBANK", "name": "ICICI BANK LTD", "exchange": "NSE"},
+            {"token": "3045", "symbol": "SBIN", "name": "STATE BANK OF INDIA", "exchange": "NSE"},
+            {"token": "881", "symbol": "KOTAKBANK", "name": "KOTAK MAHINDRA BANK", "exchange": "NSE"},
+            {"token": "3456", "symbol": "TATAMOTORS", "name": "TATA MOTORS LTD", "exchange": "NSE"},
+            {"token": "2475", "symbol": "ONGC", "name": "OIL AND NATURAL GAS CORP", "exchange": "NSE"},
+            {"token": "467", "symbol": "HINDUNILVR", "name": "HINDUSTAN UNILEVER", "exchange": "NSE"}
+        ]
+    }
+
+
+@app.get("/api/broker/status/{account_id}")
+async def get_broker_status(account_id: str):
+    """Get broker connection status."""
+    is_connected = account_id in connected_brokers
+    
+    if is_connected:
+        broker_data = connected_brokers[account_id]
+        return {
+            "connected": True,
+            "connected_at": broker_data.get("connected_at"),
+            "demo_mode": broker_data.get("demo", False)
+        }
+    
+    return {"connected": False}
