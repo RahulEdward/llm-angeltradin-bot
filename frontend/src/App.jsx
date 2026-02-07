@@ -16,7 +16,7 @@ const App = () => {
     const [isAuthenticated, setIsAuthenticated] = useState(false);
     const [user, setUser] = useState(null);
     const [currentPage, setCurrentPage] = useState('dashboard');
-    const [mode, setMode] = useState('test');
+    const [mode, setMode] = useState('paper');
     const [isRunning, setIsRunning] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
     const [systemStatus, setSystemStatus] = useState(null);
@@ -160,14 +160,14 @@ const App = () => {
 
                     <div className="status-indicators">
                         <div className="controls">
-                            {/* Mode Toggle: Test / Live */}
+                            {/* Mode Toggle: Paper / Live */}
                             <div className="mode-toggle-container">
                                 <button
-                                    className={`mode-toggle-btn ${mode === 'test' ? 'active' : ''}`}
-                                    onClick={() => handleModeChange('test')}
-                                    title="Test Mode - Paper Trading"
+                                    className={`mode-toggle-btn ${mode === 'paper' ? 'active' : ''}`}
+                                    onClick={() => handleModeChange('paper')}
+                                    title="Paper Mode - Simulated Trading"
                                 >
-                                    🧪 Test
+                                    📝 Paper
                                 </button>
                                 <button
                                     className={`mode-toggle-btn ${mode === 'live' ? 'active' : ''}`}
