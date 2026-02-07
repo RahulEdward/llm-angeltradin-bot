@@ -1,0 +1,142 @@
+# LLM-AngelAgent Trading Configuration
+
+# Trading Parameters
+trading:
+  mode: paper  # live | paper | backtest
+  symbols:
+    - RELIANCE
+    - TCS
+    - INFY
+    - HDFCBANK
+    - ICICIBANK
+  default_exchange: NSE
+  timeframes:
+    - 5m
+    - 15m
+    - 1h
+
+# Agent Configuration
+agents:
+  # Core Agents (Always Enabled)
+  market_data_agent: true
+  supervisor_agent: true
+  
+  # Strategy Agents
+  strategy_agent: true
+  use_llm_strategy: true  # Set to false for rule-based only
+  
+  # Risk Management
+  risk_manager_agent: true
+  
+  # Execution
+  execution_agent: true
+  
+  # Backtesting
+  backtest_agent: true
+  
+  # LLM Analysis (Optional - More expensive)
+  enable_bull_bear_debate: true  # Bull vs Bear adversarial analysis
+  enable_reflection: true  # Post-trade reflection
+
+# Strategy Parameters
+strategy:
+  # Four-Layer Filter
+  layer1_enabled: true  # Trend + Fuel (1h EMA + Volume)
+  layer2_enabled: true  # AI Filter (PredictAgent alignment)
+  layer3_enabled: true  # Setup (15m entry zone)
+  layer4_enabled: true  # Trigger (5m confirmation)
+  
+  # Confidence Thresholds
+  min_confidence: 0.6
+  high_confidence: 0.8
+  
+  # Technical Indicators
+  ema_short: 9
+  ema_medium: 21
+  ema_long: 50
+  rsi_period: 14
+  rsi_oversold: 35
+  rsi_overbought: 65
+  bb_period: 20
+  bb_std: 2.0
+  atr_period: 14
+
+# Risk Management
+risk:
+  max_position_size: 100000  # Max ₹ per position
+  max_daily_loss: 50000  # Daily loss limit ₹
+  max_trades_per_day: 20
+  max_drawdown_pct: 5.0
+  default_stop_loss_pct: 2.0
+  default_take_profit_pct: 4.0
+  risk_reward_ratio: 2.0
+  
+  # Kill Switch Triggers
+  auto_kill_on_max_loss: true
+  auto_kill_on_max_drawdown: true
+
+# LLM Configuration
+llm:
+  provider: openai  # openai | anthropic | ollama | groq
+  model: gpt-4-turbo-preview
+  temperature: 0.3
+  max_tokens: 1000
+  
+  # Prompts
+  system_prompt: |
+    You are an expert financial analyst and trader specializing in Indian equity markets.
+    Your role is to analyze market data and provide clear, actionable trading decisions.
+    Always provide JSON-formatted responses with your analysis and recommendations.
+    Consider technical indicators, market conditions, and risk factors in your analysis.
+  
+  # Bull/Bear Debate
+  bull_prompt: |
+    You are a bullish analyst. Find reasons to BUY this stock based on the data provided.
+    Focus on positive momentum, support levels, and bullish patterns.
+  
+  bear_prompt: |
+    You are a bearish analyst. Find reasons to SELL or AVOID this stock based on the data.
+    Focus on resistance levels, overbought conditions, and bearish patterns.
+
+# Backtesting
+backtest:
+  default_capital: 1000000
+  commission_pct: 0.03
+  slippage_pct: 0.05
+  include_dividends: false
+  parallel_runs: 4
+
+# Database
+database:
+  url: sqlite+aiosqlite:///./data/trading.db
+  echo: false
+  pool_size: 5
+
+# Server
+server:
+  host: 0.0.0.0
+  port: 8000
+  reload: false
+  workers: 4
+
+# Logging
+logging:
+  level: INFO
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+  rotation: "1 day"
+  retention: "30 days"
+  
+  # Log files
+  files:
+    system: logs/system.log
+    trades: logs/trades.log
+    agents: logs/agents.log
+    errors: logs/errors.log
+
+# Data Storage
+data:
+  market_data: data/market_data/
+  indicators: data/indicators/
+  decisions: data/decisions/
+  execution: data/execution/
+  backtest: data/backtest/
