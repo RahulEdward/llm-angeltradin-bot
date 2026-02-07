@@ -53,7 +53,7 @@ const App = () => {
                     setSystemStatus(data.data);
                     setIsRunning(data.data.is_running);
                     setCycleCount(data.data.cycle_count || 0);
-                    setMode(data.data.mode || 'test');
+                    // Don't override mode from WS - let user control it
                 }
             };
             websocket.onerror = () => {
@@ -67,6 +67,8 @@ const App = () => {
         }
     }, [isAuthenticated]);
 
+    const [modeLoaded, setModeLoaded] = useState(false);
+
     const fetchStatus = async () => {
         try {
             const res = await fetch('/api/status');
@@ -74,7 +76,11 @@ const App = () => {
             setSystemStatus(data);
             setIsRunning(data.is_running);
             setCycleCount(data.cycle_count || 0);
-            setMode(data.mode || 'test');
+            // Only set mode on first load
+            if (!modeLoaded && data.mode) {
+                setMode(data.mode);
+                setModeLoaded(true);
+            }
         } catch (err) {
             console.log('Status fetch failed, using defaults');
         }
