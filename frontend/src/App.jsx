@@ -21,7 +21,7 @@ const App = () => {
     const [isPaused, setIsPaused] = useState(false);
     const [systemStatus, setSystemStatus] = useState(null);
     const [cycleCount, setCycleCount] = useState(0);
-    const [equity, setEquity] = useState(1000.00);
+    const [equity, setEquity] = useState(0);
     const [interval, setIntervalValue] = useState('1');
     const [showSettings, setShowSettings] = useState(false);
     const [ws, setWs] = useState(null);
@@ -81,8 +81,25 @@ const App = () => {
                 setMode(data.mode);
                 setModeLoaded(true);
             }
+
+            // Fetch funds for header display
+            fetchFunds();
         } catch (err) {
             console.log('Status fetch failed, using defaults');
+        }
+    };
+
+    const fetchFunds = async () => {
+        try {
+            const res = await fetch('/api/account/funds');
+            if (res.ok) {
+                const data = await res.json();
+                // Calculate Total Equity = Available Cash + Utilized Margin + Collateral
+                const totalEquity = (data.available || 0) + (data.utilized || 0) + (data.collateral || 0);
+                setEquity(totalEquity);
+            }
+        } catch (err) {
+            console.error('Failed to fetch funds:', err);
         }
     };
 
@@ -123,12 +140,24 @@ const App = () => {
 
     const handleModeChange = async (newMode) => {
         try {
-            await fetch('/api/mode', {
+            const res = await fetch('/api/mode', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode: newMode })
             });
+            const data = await res.json();
             setMode(newMode);
+            
+            // Warn if switching to live without broker
+            if (newMode === 'live' && data.broker_connected === false) {
+                alert('⚠️ Live mode active but no broker connected.\nGo to Settings → Accounts to connect your broker with TOTP.');
+            }
+            
+            // Re-fetch funds immediately after mode change so header equity updates
+            setTimeout(() => {
+                fetchFunds();
+                fetchStatus();
+            }, 300);
         } catch (err) {
             console.error('Failed to change mode:', err);
             setMode(newMode);

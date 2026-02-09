@@ -22,14 +22,34 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
 
     useEffect(() => {
         fetchData();
+        fetchAgentStatus();
         connectWebSocket();
 
         const interval = setInterval(fetchData, 5000);
+        const agentInterval = setInterval(fetchAgentStatus, 10000);
         return () => {
             clearInterval(interval);
+            clearInterval(agentInterval);
             if (wsRef.current) wsRef.current.close();
         };
-    }, []);
+    }, [mode]); // Re-fetch when mode changes
+
+    const fetchAgentStatus = async () => {
+        try {
+            const res = await fetch('/api/agent/status');
+            if (res.ok) {
+                const data = await res.json();
+                setLlmEnabled(data.llm_enabled || false);
+                setLlmProvider(data.llm_provider || '--');
+                setLlmModel(data.llm_model || '--');
+                if (data.symbols && data.symbols.length > 0) {
+                    setCurrentSymbol(data.symbols[0]);
+                }
+            }
+        } catch (err) {
+            console.log('Agent status fetch failed');
+        }
+    };
 
     const connectWebSocket = () => {
         try {
@@ -60,9 +80,10 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
 
     const fetchData = async () => {
         try {
-            const [positionsRes, fundsRes] = await Promise.all([
+            const [positionsRes, fundsRes, tradesRes] = await Promise.all([
                 fetch('/api/positions').catch(() => null),
-                fetch('/api/account/funds').catch(() => null)
+                fetch('/api/account/funds').catch(() => null),
+                fetch('/api/trades').catch(() => null)
             ]);
 
             if (positionsRes?.ok) {
@@ -73,6 +94,23 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
             if (fundsRes?.ok) {
                 const fundsData = await fundsRes.json();
                 setFunds(fundsData || { available: 0, utilized: 0 });
+            }
+
+            // Update trade records from broker (live mode)
+            if (tradesRes?.ok) {
+                const tradesData = await tradesRes.json();
+                if (tradesData && tradesData.length > 0) {
+                    // Transform broker trades to our format
+                    const formattedTrades = tradesData.map(t => ({
+                        time: t.updatetime || t.orderUpdateTime || new Date().toLocaleTimeString(),
+                        symbol: t.tradingsymbol || t.symbol,
+                        side: t.transactiontype || t.side || '--',
+                        entry: parseFloat(t.fillprice || t.price || 0),
+                        exit: null,
+                        pnl: 0
+                    }));
+                    setTradeRecords(formattedTrades);
+                }
             }
 
             setLoading(false);
@@ -163,7 +201,7 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                         <div className="account-stats-compact">
                             <div className="stat-row">
                                 <span className="label">Wallet Balance</span>
-                                <span className="value">₹{(funds.available || 1000).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                                <span className="value">₹{(funds.available || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                             </div>
                             <div className="stat-row">
                                 <span className="label">Realized PnL</span>

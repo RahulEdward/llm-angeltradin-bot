@@ -19,6 +19,9 @@ from .base import (
 from .angel_one import AngelOneBroker
 from .paper_broker import PaperBroker
 from .factory import BrokerFactory
+from .angel_websocket import SmartWebSocketV2
+from .angel_mapping import AngelExchangeMapper, AngelCapabilityRegistry
+from .angel_order_api import AngelOrderAPI
 
 __all__ = [
     "BaseBroker",
@@ -34,5 +37,9 @@ __all__ = [
     "OrderStatus",
     "AngelOneBroker",
     "PaperBroker",
-    "BrokerFactory"
+    "BrokerFactory",
+    "SmartWebSocketV2",
+    "AngelExchangeMapper",
+    "AngelCapabilityRegistry",
+    "AngelOrderAPI"
 ]

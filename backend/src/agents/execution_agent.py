@@ -31,11 +31,16 @@ class ExecutionAgent(BaseAgent):
         if not self._broker:
             self._broker = BrokerFactory.create()
         
-        if not await self._broker.is_connected():
-            connected = await self._broker.connect()
-            if not connected:
-                self.log_error("Failed to connect broker")
-                return False
+        if self._broker:
+            try:
+                if not await self._broker.is_connected():
+                    connected = await self._broker.connect()
+                    if not connected:
+                        logger.warning("Broker not connected - ExecutionAgent will wait")
+            except Exception as e:
+                logger.warning(f"Broker connection check failed: {e}")
+        else:
+            logger.warning("No broker available - ExecutionAgent running in limited mode")
         
         logger.info(f"ExecutionAgent initialized - Mode: {settings.trading_mode.value}")
         return True

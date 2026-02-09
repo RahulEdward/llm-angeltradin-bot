@@ -40,7 +40,7 @@ def init_db():
         )
     ''')
     
-    # Broker accounts table
+    # Broker accounts table with tokens
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS broker_accounts (
             id TEXT PRIMARY KEY,
@@ -51,6 +51,10 @@ def init_db():
             api_key_last4 TEXT,
             pin_encrypted TEXT NOT NULL,
             status TEXT DEFAULT 'disconnected',
+            feed_token TEXT,
+            refresh_token TEXT,
+            jwt_token TEXT,
+            token_expiry TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_connected TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
@@ -92,6 +96,23 @@ def init_db():
             take_profit_pct REAL DEFAULT 4.0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+    
+    # API Keys table — stores LLM provider keys per user, encrypted
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            api_key_encrypted TEXT NOT NULL,
+            api_key_last4 TEXT,
+            model_name TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE(user_id, provider)
         )
     ''')
     
@@ -291,6 +312,126 @@ def save_user_settings(user_id: int, **kwargs):
     
     conn.commit()
     conn.close()
+
+
+# ============================================
+# API Key Functions (LLM keys per user)
+# ============================================
+
+def _get_fernet():
+    """Get Fernet cipher for API key encryption."""
+    from cryptography.fernet import Fernet
+    key_file = Path(__file__).parent.parent / "data" / ".encryption_key"
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    if key_file.exists():
+        key = key_file.read_bytes()
+    else:
+        key = Fernet.generate_key()
+        key_file.write_bytes(key)
+    return Fernet(key)
+
+
+def save_api_key(user_id: int, provider: str, api_key: str, model_name: str = None):
+    """Save or update an LLM API key for a user (encrypted)."""
+    f = _get_fernet()
+    encrypted = f.encrypt(api_key.encode()).decode()
+    last4 = api_key[-4:] if len(api_key) >= 4 else api_key
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT id FROM api_keys WHERE user_id = ? AND provider = ?', (user_id, provider))
+    exists = cursor.fetchone()
+
+    if exists:
+        cursor.execute('''
+            UPDATE api_keys SET api_key_encrypted = ?, api_key_last4 = ?, model_name = ?,
+                               is_active = 1, updated_at = ?
+            WHERE user_id = ? AND provider = ?
+        ''', (encrypted, last4, model_name, datetime.now().isoformat(), user_id, provider))
+    else:
+        cursor.execute('''
+            INSERT INTO api_keys (user_id, provider, api_key_encrypted, api_key_last4, model_name)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, provider, encrypted, last4, model_name))
+
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_api_keys(user_id: int):
+    """Get all saved API keys for a user (masked, not decrypted)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT provider, api_key_last4, model_name, is_active, created_at, updated_at
+        FROM api_keys WHERE user_id = ?
+    ''', (user_id,))
+
+    keys = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return keys
+
+
+def get_api_key_decrypted(user_id: int, provider: str):
+    """Get decrypted API key for a specific provider."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT api_key_encrypted FROM api_keys
+        WHERE user_id = ? AND provider = ? AND is_active = 1
+    ''', (user_id, provider))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        try:
+            f = _get_fernet()
+            return f.decrypt(row['api_key_encrypted'].encode()).decode()
+        except Exception:
+            return None
+    return None
+
+
+def delete_api_key(user_id: int, provider: str):
+    """Delete an API key for a user."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM api_keys WHERE user_id = ? AND provider = ?', (user_id, provider))
+    deleted = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def get_all_active_api_keys(user_id: int):
+    """Get all active API keys decrypted (for loading into settings on startup)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT provider, api_key_encrypted, model_name FROM api_keys
+        WHERE user_id = ? AND is_active = 1
+    ''', (user_id,))
+
+    keys = {}
+    f = _get_fernet()
+    for row in cursor.fetchall():
+        try:
+            decrypted = f.decrypt(row['api_key_encrypted'].encode()).decode()
+            keys[row['provider']] = {
+                "api_key": decrypted,
+                "model_name": row['model_name']
+            }
+        except Exception:
+            pass
+
+    conn.close()
+    return keys
 
 
 # ============================================

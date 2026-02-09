@@ -19,6 +19,9 @@ class AgentType(str, Enum):
     MEMORY = "memory"
     BACKTEST = "backtest"
     SUPERVISOR = "supervisor"
+    REGIME_DETECTOR = "regime_detector"
+    PREDICT = "predict"
+    REFLECTION = "reflection"
 
 
 class MessageType(str, Enum):
@@ -31,6 +34,9 @@ class MessageType(str, Enum):
     VETO = "veto"
     STATE_UPDATE = "state_update"
     ERROR = "error"
+    REFLECTION = "reflection"
+    REGIME_UPDATE = "regime_update"
+    PREDICTION = "prediction"
 
 
 @dataclass

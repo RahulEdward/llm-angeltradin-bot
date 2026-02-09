@@ -26,6 +26,8 @@ const Settings = ({ embedded = false, onClose }) => {
     // LLM Settings
     const [llmProvider, setLlmProvider] = useState('none');
     const [llmApiKey, setLlmApiKey] = useState('');
+    const [savedKeys, setSavedKeys] = useState([]);
+    const [keyStatus, setKeyStatus] = useState(''); // 'saved', 'saving', ''
 
     useEffect(() => {
         loadAccounts();
@@ -53,7 +55,8 @@ const Settings = ({ embedded = false, onClose }) => {
             if (res.ok) {
                 const data = await res.json();
                 setLlmProvider(data.llm_provider || 'none');
-                if (data.llm_api_key) setLlmApiKey('saved');
+                setSavedKeys(data.api_keys || []);
+                if (data.llm_api_key) setKeyStatus('saved');
             }
         } catch (err) {
             console.log('Settings load failed');
@@ -179,19 +182,48 @@ const Settings = ({ embedded = false, onClose }) => {
     };
 
     const saveLLMSettings = async () => {
+        if (llmProvider === 'none') {
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2000);
+            return;
+        }
+        setKeyStatus('saving');
         try {
+            const body = {
+                llm_provider: llmProvider,
+            };
+            // Only send key if user typed a new one
+            if (llmApiKey && llmApiKey !== '') {
+                body.llm_api_key = llmApiKey;
+            }
             await fetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    llm_provider: llmProvider,
-                    llm_api_key: llmApiKey !== 'saved' ? llmApiKey : undefined
-                })
+                body: JSON.stringify(body)
             });
+            setLlmApiKey('');
+            setKeyStatus('saved');
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
+            // Reload to get updated saved keys list
+            loadSettings();
         } catch (err) {
             console.error('Save failed');
+            setKeyStatus('');
+        }
+    };
+
+    const deleteApiKey = async (provider) => {
+        if (!confirm(`Delete ${provider} API key?`)) return;
+        try {
+            await fetch(`/api/settings/api-key/${provider}`, { method: 'DELETE' });
+            setSavedKeys(savedKeys.filter(k => k.provider !== provider));
+            if (provider === llmProvider) {
+                setKeyStatus('');
+            }
+            loadSettings();
+        } catch (err) {
+            console.error('Delete failed');
         }
     };
 
@@ -333,37 +365,74 @@ const Settings = ({ embedded = false, onClose }) => {
                 {/* API Keys Tab */}
                 {activeTab === 'api' && (
                     <div className="tab-pane">
-                        <div className="form-group">
-                            <label>🤖 LLM Provider</label>
-                            <select
-                                value={llmProvider}
-                                onChange={(e) => setLlmProvider(e.target.value)}
-                                className="form-input"
-                            >
-                                <option value="none">None (No LLM)</option>
-                                <option value="deepseek">DeepSeek</option>
-                                <option value="openai">OpenAI</option>
-                                <option value="gemini">Google Gemini</option>
-                            </select>
-                        </div>
-
-                        {llmProvider !== 'none' && (
-                            <div className="form-group">
-                                <label>{llmProvider.charAt(0).toUpperCase() + llmProvider.slice(1)} API Key</label>
-                                <input
-                                    type="password"
-                                    value={llmApiKey === 'saved' ? '' : llmApiKey}
-                                    placeholder={llmApiKey === 'saved' ? 'Saved (Hidden)' : 'Enter API Key'}
-                                    onChange={(e) => setLlmApiKey(e.target.value)}
-                                    className="form-input"
-                                />
+                        {/* Saved API Keys */}
+                        {savedKeys.length > 0 && (
+                            <div className="section-box">
+                                <h4>🔑 Saved API Keys</h4>
+                                <div className="accounts-list">
+                                    {savedKeys.map(k => (
+                                        <div key={k.provider} className="account-card connected">
+                                            <div className="account-row">
+                                                <div className="account-info">
+                                                    <span className="broker-badge">
+                                                        {k.provider === 'openai' ? '🤖' : k.provider === 'deepseek' ? '🔮' : k.provider === 'gemini' ? '💎' : '🧠'} {k.provider.charAt(0).toUpperCase() + k.provider.slice(1)}
+                                                    </span>
+                                                    <span className="status connected">
+                                                        {k.is_active ? '🟢 Active' : '🔴 Inactive'}
+                                                    </span>
+                                                </div>
+                                                <button className="delete-btn" onClick={() => deleteApiKey(k.provider)}>🗑️</button>
+                                            </div>
+                                            <div className="account-details">
+                                                <span>Key: <b>{k.masked_key}</b></span>
+                                                {k.model_name && <span>Model: <b>{k.model_name}</b></span>}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
                         )}
 
-                        <div className="footer-actions">
-                            <button className="save-btn" onClick={saveLLMSettings}>
-                                {saved ? '✓ Saved!' : 'Save Changes'}
-                            </button>
+                        {/* Add / Update Key */}
+                        <div className="section-box">
+                            <h4>{savedKeys.length > 0 ? '✏️ Add / Update Key' : '🤖 Configure LLM'}</h4>
+                            <div className="form-group">
+                                <label>LLM Provider</label>
+                                <select
+                                    value={llmProvider}
+                                    onChange={(e) => { setLlmProvider(e.target.value); setLlmApiKey(''); setKeyStatus(''); }}
+                                    className="form-input"
+                                >
+                                    <option value="none">None (No LLM)</option>
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="openai">OpenAI</option>
+                                    <option value="gemini">Google Gemini</option>
+                                </select>
+                            </div>
+
+                            {llmProvider !== 'none' && (
+                                <div className="form-group">
+                                    <label>{llmProvider.charAt(0).toUpperCase() + llmProvider.slice(1)} API Key</label>
+                                    <input
+                                        type="password"
+                                        value={llmApiKey}
+                                        placeholder={savedKeys.find(k => k.provider === llmProvider) ? `Saved (${savedKeys.find(k => k.provider === llmProvider).masked_key}) — paste new to update` : 'Paste API Key'}
+                                        onChange={(e) => { setLlmApiKey(e.target.value); setKeyStatus(''); }}
+                                        className="form-input"
+                                    />
+                                    {savedKeys.find(k => k.provider === llmProvider) && (
+                                        <div style={{ fontSize: '0.75rem', color: '#00ff9d', marginTop: 4 }}>
+                                            ✅ Key saved — leave blank to keep current, or paste new to update
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            <div className="footer-actions">
+                                <button className="save-btn" onClick={saveLLMSettings} disabled={keyStatus === 'saving'}>
+                                    {keyStatus === 'saving' ? '⏳ Saving...' : saved ? '✓ Saved!' : '💾 Save Key'}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 )}
