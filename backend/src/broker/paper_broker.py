@@ -1,7 +1,7 @@
 """
 Paper Trading Broker Implementation
 Simulates order execution using real market data without actual trades.
-Also supports standalone mode (no data_broker) for pure paper trading with simulated prices.
+Requires real broker connection for market data — no standalone simulated mode.
 """
 
 import uuid
@@ -18,11 +18,11 @@ from .angel_one import AngelOneBroker
 
 class PaperBroker(BaseBroker):
     """
-    Paper trading broker that simulates order execution.
+    Paper trading broker that simulates order execution using real market data.
     
-    Supports two modes:
-    1. With data_broker: Uses real market data for quotes, simulates orders
-    2. Standalone (data_broker=None): Fully simulated, uses injected prices from MarketDataAgent
+    - Uses data_broker (AngelOne) for real quotes and historical data
+    - Simulates order fills, positions, and P&L tracking
+    - Also accepts price updates from MarketDataAgent for order execution
     """
     
     def __init__(
@@ -41,7 +41,7 @@ class PaperBroker(BaseBroker):
         self._order_book: List[Dict] = []
         self._trade_history: List[Dict] = []
         
-        # Standalone mode: simulated prices injected by MarketDataAgent
+        # Real prices pushed by MarketDataAgent for order execution
         self._simulated_prices: Dict[str, Dict[str, Any]] = {}
         
         self._connected = False
@@ -49,16 +49,16 @@ class PaperBroker(BaseBroker):
     
     def update_simulated_prices(self, prices: Dict[str, Dict[str, Any]]) -> None:
         """
-        Update simulated prices (called by MarketDataAgent each cycle).
+        Update prices (called by MarketDataAgent each cycle with real broker data).
         prices: {"NSE:RELIANCE": {"ltp": 2450.0, "bid": 2449.5, "ask": 2450.5}, ...}
         """
         self._simulated_prices = prices
 
     async def connect(self) -> bool:
-        """Connect. In standalone mode, always succeeds."""
+        """Connect paper broker."""
         if self._standalone:
             self._connected = True
-            logger.info(f"Paper broker (standalone) ready with capital: ₹{self.initial_capital:,.2f}")
+            logger.info(f"Paper broker ready (no data broker) with capital: ₹{self.initial_capital:,.2f}")
             return True
         try:
             self._connected = await self.data_broker.connect()
@@ -73,7 +73,6 @@ class PaperBroker(BaseBroker):
         if self.data_broker:
             await self.data_broker.disconnect()
         self._connected = False
-        logger.info("Paper broker disconnected")
     
     async def is_connected(self) -> bool:
         if self._standalone:
@@ -84,25 +83,25 @@ class PaperBroker(BaseBroker):
         if self.data_broker:
             return await self.data_broker.refresh_token()
         return True
-    
+
     # ============================================
     # Order Management (Simulated)
     # ============================================
     
-    def _get_simulated_quote(self, symbol: str, exchange: str) -> Optional[Dict[str, float]]:
-        """Get simulated price for a symbol."""
+    def _get_price(self, symbol: str, exchange: str) -> Optional[Dict[str, float]]:
+        """Get price for a symbol from cached prices."""
         key = f"{exchange}:{symbol}"
         return self._simulated_prices.get(key)
     
     async def place_order(self, order: OrderRequest) -> OrderResult:
-        """Simulate order placement."""
+        """Simulate order placement using real prices."""
         if not self._connected:
             return OrderResult(success=False, message="Not connected")
         
         try:
             order_id = f"PAPER_{uuid.uuid4().hex[:12].upper()}"
             
-            # Get current market price (real or simulated)
+            # Get current market price from real broker first
             exec_price = 0
             if self.data_broker and not self._standalone:
                 try:
@@ -114,16 +113,16 @@ class PaperBroker(BaseBroker):
                 except Exception:
                     pass
             
-            # Fallback to simulated prices
+            # Fallback to cached prices from MarketDataAgent
             if exec_price == 0:
-                sim = self._get_simulated_quote(order.symbol, order.exchange)
-                if sim:
-                    exec_price = sim.get("ask", sim.get("ltp", 0)) if order.side == OrderSide.BUY else sim.get("bid", sim.get("ltp", 0))
+                cached = self._get_price(order.symbol, order.exchange)
+                if cached:
+                    exec_price = cached.get("ask", cached.get("ltp", 0)) if order.side == OrderSide.BUY else cached.get("bid", cached.get("ltp", 0))
             
             if exec_price == 0:
                 return OrderResult(
                     success=False,
-                    message="Unable to get market quote for order execution",
+                    message="No market price available — connect broker for real data",
                     status=OrderStatus.REJECTED
                 )
             
@@ -150,8 +149,7 @@ class PaperBroker(BaseBroker):
             if order.side == OrderSide.BUY and status == OrderStatus.FILLED:
                 if trade_value > self.available_capital:
                     return OrderResult(
-                        success=False,
-                        message="Insufficient capital",
+                        success=False, message="Insufficient capital",
                         status=OrderStatus.REJECTED
                     )
                 self.available_capital -= trade_value
@@ -194,14 +192,11 @@ class PaperBroker(BaseBroker):
             )
             
             return OrderResult(
-                success=True,
-                order_id=order_id,
-                broker_order_id=order_id,
+                success=True, order_id=order_id, broker_order_id=order_id,
                 message=f"Paper order {status.value.lower()}",
                 status=status,
                 filled_quantity=order.quantity if status == OrderStatus.FILLED else 0,
-                average_price=exec_price,
-                raw_response=order_data
+                average_price=exec_price, raw_response=order_data
             )
             
         except Exception as e:
@@ -319,14 +314,13 @@ class PaperBroker(BaseBroker):
         return self._order_book.copy()
 
     # ============================================
-    # Position & Holdings (Simulated)
+    # Position & Holdings
     # ============================================
     
     async def get_positions(self) -> List[Position]:
-        """Get simulated positions with updated P&L."""
+        """Get positions with updated P&L from real prices."""
         positions = []
         for pos_key, pos in self._positions.items():
-            # Try real quote first, then simulated
             updated = False
             if self.data_broker and not self._standalone:
                 try:
@@ -338,9 +332,9 @@ class PaperBroker(BaseBroker):
                     pass
             
             if not updated:
-                sim = self._get_simulated_quote(pos.symbol, pos.exchange)
-                if sim:
-                    pos.ltp = sim.get("ltp", pos.ltp)
+                cached = self._get_price(pos.symbol, pos.exchange)
+                if cached:
+                    pos.ltp = cached.get("ltp", pos.ltp)
             
             if pos.side == OrderSide.BUY:
                 pos.pnl = (pos.ltp - pos.average_price) * pos.quantity
@@ -354,7 +348,7 @@ class PaperBroker(BaseBroker):
         return list(self._holdings.values())
     
     # ============================================
-    # Market Data (Delegated to real broker or simulated)
+    # Market Data (Delegated to real broker)
     # ============================================
     
     async def get_ltp(self, symbol: str, exchange: str) -> float:
@@ -363,8 +357,8 @@ class PaperBroker(BaseBroker):
                 return await self.data_broker.get_ltp(symbol, exchange)
             except Exception:
                 pass
-        sim = self._get_simulated_quote(symbol, exchange)
-        return sim.get("ltp", 0) if sim else 0
+        cached = self._get_price(symbol, exchange)
+        return cached.get("ltp", 0) if cached else 0
     
     async def get_quote(self, symbol: str, exchange: str) -> Optional[Quote]:
         if self.data_broker and not self._standalone:
@@ -372,17 +366,16 @@ class PaperBroker(BaseBroker):
                 return await self.data_broker.get_quote(symbol, exchange)
             except Exception:
                 pass
-        # Build Quote from simulated prices
-        sim = self._get_simulated_quote(symbol, exchange)
-        if sim:
+        cached = self._get_price(symbol, exchange)
+        if cached:
             return Quote(
                 symbol=symbol, exchange=exchange,
-                ltp=sim.get("ltp", 0), open=sim.get("open", 0),
-                high=sim.get("high", 0), low=sim.get("low", 0),
-                close=sim.get("close", sim.get("ltp", 0)),
-                volume=sim.get("volume", 0),
-                bid=sim.get("bid", sim.get("ltp", 0)),
-                ask=sim.get("ask", sim.get("ltp", 0)),
+                ltp=cached.get("ltp", 0), open=cached.get("open", 0),
+                high=cached.get("high", 0), low=cached.get("low", 0),
+                close=cached.get("close", cached.get("ltp", 0)),
+                volume=cached.get("volume", 0),
+                bid=cached.get("bid", cached.get("ltp", 0)),
+                ask=cached.get("ask", cached.get("ltp", 0)),
                 timestamp=datetime.now()
             )
         return None
@@ -404,7 +397,7 @@ class PaperBroker(BaseBroker):
         return []
     
     # ============================================
-    # Account Information (Simulated)
+    # Account Information
     # ============================================
     
     async def get_profile(self) -> Dict[str, Any]:

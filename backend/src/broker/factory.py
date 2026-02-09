@@ -43,18 +43,20 @@ class BrokerFactory:
     ) -> Optional[BaseBroker]:
         """
         Create a broker instance based on trading mode.
-        
-        Args:
-            mode: Trading mode (live/paper/backtest)
-            api_key: Angel One API key (optional, uses settings if not provided)
-            client_id: Trading client ID
-            password: Trading password
-            totp_secret: TOTP secret for 2FA
-            
-        Returns:
-            Appropriate broker implementation or None if not configured
+        Reuses existing instance if same mode and already created.
         """
         mode = mode or settings.trading_mode
+        
+        # ALWAYS reuse existing instance for paper mode
+        if cls._instance is not None:
+            from .paper_broker import PaperBroker
+            if mode == TradingMode.PAPER and isinstance(cls._instance, PaperBroker):
+                logger.debug(f"Reusing existing PaperBroker id={id(cls._instance)}")
+                return cls._instance
+            if mode == TradingMode.LIVE and isinstance(cls._instance, AngelOneBroker):
+                return cls._instance
+            if mode == TradingMode.BACKTEST and isinstance(cls._instance, PaperBroker):
+                return cls._instance
         
         if mode == TradingMode.LIVE:
             logger.info("Creating LIVE trading broker")

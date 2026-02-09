@@ -49,6 +49,32 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
         } catch (err) {
             console.log('Agent status fetch failed');
         }
+
+        // Fetch LLM metrics
+        try {
+            const mRes = await fetch('/api/llm/metrics');
+            if (mRes.ok) {
+                const mData = await mRes.json();
+                const providers = mData?.metrics?.providers || {};
+                // Find first provider with data
+                const stats = Object.values(providers)[0];
+                if (stats) {
+                    setLlmMetrics({
+                        tokensIn: stats.total_input_tokens?.toLocaleString() || '0',
+                        tokensOut: stats.total_output_tokens?.toLocaleString() || '0',
+                        tokensTotal: stats.total_tokens?.toLocaleString() || '0',
+                        speed: stats.token_speed_tps || '0',
+                        latency: {
+                            min: stats.min_latency_ms || '0',
+                            avg: stats.avg_latency_ms || '0',
+                            max: stats.max_latency_ms || '0'
+                        }
+                    });
+                }
+            }
+        } catch (err) {
+            console.log('LLM metrics fetch failed');
+        }
     };
 
     const connectWebSocket = () => {

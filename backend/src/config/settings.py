@@ -20,6 +20,8 @@ class LLMProvider(str, Enum):
     """Supported LLM providers"""
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
+    GEMINI = "gemini"
     OLLAMA = "ollama"
     GROQ = "groq"
 
@@ -48,6 +50,8 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gpt-4-turbo-preview")
     openai_api_key: Optional[str] = Field(default=None)
     anthropic_api_key: Optional[str] = Field(default=None)
+    deepseek_api_key: Optional[str] = Field(default=None)
+    gemini_api_key: Optional[str] = Field(default=None)
     ollama_base_url: str = Field(default="http://localhost:11434")
     groq_api_key: Optional[str] = Field(default=None)
     

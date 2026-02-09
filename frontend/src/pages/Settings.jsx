@@ -375,7 +375,7 @@ const Settings = ({ embedded = false, onClose }) => {
                                             <div className="account-row">
                                                 <div className="account-info">
                                                     <span className="broker-badge">
-                                                        {k.provider === 'openai' ? '🤖' : k.provider === 'deepseek' ? '🔮' : k.provider === 'gemini' ? '💎' : '🧠'} {k.provider.charAt(0).toUpperCase() + k.provider.slice(1)}
+                                                        {k.provider === 'openai' ? '🤖' : k.provider === 'deepseek' ? '🔮' : k.provider === 'gemini' ? '💎' : k.provider === 'anthropic' ? '🧠' : '🤖'} {k.provider.charAt(0).toUpperCase() + k.provider.slice(1)}
                                                     </span>
                                                     <span className="status connected">
                                                         {k.is_active ? '🟢 Active' : '🔴 Inactive'}
@@ -407,6 +407,7 @@ const Settings = ({ embedded = false, onClose }) => {
                                     <option value="deepseek">DeepSeek</option>
                                     <option value="openai">OpenAI</option>
                                     <option value="gemini">Google Gemini</option>
+                                    <option value="anthropic">Claude (Anthropic)</option>
                                 </select>
                             </div>
 

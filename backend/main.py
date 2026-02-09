@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     llm_status = "OFF"
     try:
         from src.llm import LLMFactory
-        if settings.openai_api_key or settings.anthropic_api_key or settings.groq_api_key:
+        if settings.openai_api_key or settings.anthropic_api_key or settings.groq_api_key or settings.deepseek_api_key or settings.gemini_api_key:
             llm = LLMFactory.get_or_create()
             if llm:
                 llm_status = f"ON ({settings.llm_provider.value}/{settings.llm_model})"
@@ -66,11 +66,19 @@ async def lifespan(app: FastAPI):
                 settings.groq_api_key = api_key
                 logger.info("Loaded Groq API key from DB")
             elif provider == "deepseek" and api_key:
-                settings.openai_api_key = api_key  # DeepSeek uses OpenAI-compatible API
+                settings.deepseek_api_key = api_key
                 logger.info("Loaded DeepSeek API key from DB")
             elif provider == "gemini" and api_key:
-                # Store for future use
+                settings.gemini_api_key = api_key
                 logger.info("Loaded Gemini API key from DB")
+            if key_data.get("model_name"):
+                settings.llm_model = key_data["model_name"]
+            # Set the provider enum to match the active key
+            try:
+                from src.config.settings import LLMProvider as LP
+                settings.llm_provider = LP(provider)
+            except (ValueError, KeyError):
+                pass
             if key_data.get("model_name"):
                 settings.llm_model = key_data["model_name"]
         
@@ -140,14 +148,17 @@ class StrategyConfig(BaseModel):
 
 
 class BacktestRequest(BaseModel):
-    symbol: str
+    symbols: List[str] = ["RELIANCE"]
+    symbol: Optional[str] = None  # Legacy single-symbol support
     exchange: str = "NSE"
     start_date: str  # ISO format
     end_date: str
-    initial_capital: float = 1000000
-    timeframe: str = "5m"
+    initial_capital: float = 100000
+    step: Optional[str] = None  # Frontend sends "1"=5m, "3"=15m, "12"=1h
+    timeframe: str = "1h"
     stop_loss_pct: float = 2.0
     take_profit_pct: float = 4.0
+    leverage: Optional[int] = None
     use_llm: bool = False
 
 
@@ -762,36 +773,68 @@ async def place_order(order: OrderRequest):
 
 @app.post("/api/backtest")
 async def run_backtest(request: BacktestRequest):
-    """Run a backtest."""
+    """Run a backtest with real historical data."""
     if not supervisor:
         raise HTTPException(status_code=503, detail="System not initialized")
     
     try:
+        # Resolve symbols: frontend sends 'symbols' array
+        symbols = request.symbols
+        if not symbols and request.symbol:
+            symbols = [request.symbol]
+        if not symbols:
+            symbols = ["RELIANCE"]
+        
+        # Resolve timeframe from step (frontend sends "1"=5m, "3"=15m, "12"=1h)
+        step_map = {"1": "5m", "3": "15m", "12": "1h"}
+        timeframe = step_map.get(request.step, request.timeframe) if request.step else request.timeframe
+        
         result = await supervisor.run_backtest(
-            symbol=request.symbol,
+            symbols=symbols,
             exchange=request.exchange,
             start_date=datetime.fromisoformat(request.start_date),
             end_date=datetime.fromisoformat(request.end_date),
             initial_capital=request.initial_capital,
-            timeframe=request.timeframe,
+            timeframe=timeframe,
             stop_loss_pct=request.stop_loss_pct,
             take_profit_pct=request.take_profit_pct,
             use_llm=request.use_llm
         )
         
+        # Return format matching frontend Backtest.jsx expectations
+        m = result.metrics
         return {
             "run_id": result.run_id,
-            "symbol": result.symbol,
-            "total_return_pct": result.total_return_pct,
-            "win_rate": result.win_rate,
-            "total_trades": result.total_trades,
-            "max_drawdown_pct": result.max_drawdown_pct,
-            "sharpe_ratio": result.sharpe_ratio,
-            "profit_factor": result.profit_factor,
-            "equity_curve": result.equity_curve[:100],  # Limit for response size
-            "trades": len(result.trades)
+            "finalEquity": m.final_equity,
+            "profitLoss": round(m.profit_amount, 2),
+            "totalReturn": m.total_return,
+            "maxDrawdown": m.max_drawdown_pct,
+            "sharpeRatio": m.sharpe_ratio,
+            "sortinoRatio": m.sortino_ratio,
+            "calmarRatio": m.calmar_ratio,
+            "volatility": m.volatility,
+            "totalTrades": m.total_trades,
+            "winRate": m.win_rate,
+            "profitFactor": m.profit_factor,
+            "longTrades": m.long_trades,
+            "shortTrades": m.short_trades,
+            "avgHoldTime": f"{m.avg_holding_time:.1f}h",
+            "maxDrawdownDuration": f"{m.max_drawdown_duration} days",
+            "avgWin": m.avg_win,
+            "avgLoss": m.avg_loss,
+            "largestWin": m.largest_win,
+            "largestLoss": m.largest_loss,
+            "longWinRate": m.long_win_rate,
+            "shortWinRate": m.short_win_rate,
+            "longPnl": m.long_pnl,
+            "shortPnl": m.short_pnl,
+            "period": f"{m.start_date} to {m.end_date}",
+            "totalDays": m.total_days,
+            "tradingDays": m.trading_days,
+            "trades": [t.to_dict() for t in result.trades[:200]]
         }
     except Exception as e:
+        logger.error(f"Backtest error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -806,20 +849,23 @@ async def get_backtest_result(run_id: str):
     if not result:
         raise HTTPException(status_code=404, detail="Backtest not found")
     
+    m = result.metrics
     return {
         "run_id": result.run_id,
-        "symbol": result.symbol,
-        "initial_capital": result.initial_capital,
-        "final_capital": result.final_capital,
-        "total_return_pct": result.total_return_pct,
-        "total_trades": result.total_trades,
-        "winning_trades": result.winning_trades,
-        "losing_trades": result.losing_trades,
-        "win_rate": result.win_rate,
-        "max_drawdown_pct": result.max_drawdown_pct,
-        "sharpe_ratio": result.sharpe_ratio,
-        "sortino_ratio": result.sortino_ratio,
-        "profit_factor": result.profit_factor
+        "finalEquity": m.final_equity,
+        "profitLoss": round(m.profit_amount, 2),
+        "totalReturn": m.total_return,
+        "maxDrawdown": m.max_drawdown_pct,
+        "sharpeRatio": m.sharpe_ratio,
+        "sortinoRatio": m.sortino_ratio,
+        "calmarRatio": m.calmar_ratio,
+        "volatility": m.volatility,
+        "totalTrades": m.total_trades,
+        "winRate": m.win_rate,
+        "profitFactor": m.profit_factor,
+        "longTrades": m.long_trades,
+        "shortTrades": m.short_trades,
+        "avgHoldTime": f"{m.avg_holding_time:.1f}h",
     }
 
 
@@ -1832,8 +1878,48 @@ async def get_agent_status():
     broker_connected = len(connected_brokers) > 0
     is_running = supervisor._is_running if supervisor else False
     
-    # Check LLM availability
-    llm_enabled = bool(settings.openai_api_key or settings.anthropic_api_key or settings.groq_api_key)
+    # Check LLM availability — check both runtime settings AND strategy agent state
+    llm_enabled = bool(
+        settings.openai_api_key or settings.anthropic_api_key or 
+        settings.groq_api_key or settings.deepseek_api_key or 
+        settings.gemini_api_key
+    )
+    
+    # Also check if keys exist in DB (may not be loaded into runtime yet)
+    if not llm_enabled:
+        try:
+            db_keys = get_api_keys(user_id=1)
+            if any(k["is_active"] for k in db_keys):
+                llm_enabled = True
+                # Load the key into runtime settings
+                decrypted = get_api_key_decrypted(user_id=1, provider=db_keys[0]["provider"])
+                if decrypted:
+                    provider = db_keys[0]["provider"]
+                    if provider == "openai":
+                        settings.openai_api_key = decrypted
+                    elif provider == "deepseek":
+                        settings.deepseek_api_key = decrypted
+                    elif provider == "anthropic":
+                        settings.anthropic_api_key = decrypted
+                    elif provider == "groq":
+                        settings.groq_api_key = decrypted
+                    elif provider == "gemini":
+                        settings.gemini_api_key = decrypted
+                    try:
+                        from src.config.settings import LLMProvider as LP
+                        settings.llm_provider = LP(provider)
+                    except (ValueError, KeyError):
+                        pass
+        except Exception:
+            pass
+    
+    # Check if strategy agent has LLM toggled on (user clicked the button)
+    strategy_llm_on = False
+    if supervisor:
+        strategy = supervisor.get_agent("strategy")
+        if strategy and hasattr(strategy, 'use_llm'):
+            strategy_llm_on = strategy.use_llm
+    
     llm_ready = False
     try:
         from src.llm import LLMFactory
@@ -1841,7 +1927,6 @@ async def get_agent_status():
         if llm:
             llm_ready = True
         elif llm_enabled:
-            # Try to create LLM instance
             llm = LLMFactory.get_or_create()
             if llm:
                 llm_ready = True
@@ -1851,16 +1936,23 @@ async def get_agent_status():
     return {
         "running": is_running,
         "broker_connected": broker_connected,
-        "llm_enabled": llm_enabled,
+        "llm_enabled": llm_enabled or strategy_llm_on,
         "llm_ready": llm_ready,
         "llm_provider": settings.llm_provider.value if settings.llm_provider else "none",
         "llm_model": settings.llm_model,
         "mode": settings.trading_mode.value,
         "cycle_count": supervisor._current_cycle if supervisor else 0,
         "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"],
-        "data_source": "broker" if broker_connected else "simulated",
-        "message": "Ready - using simulated data" if not broker_connected else "Ready - broker connected"
+        "data_source": "broker" if broker_connected else "none",
+        "message": "Connect broker for live data" if not broker_connected else "Ready - broker connected"
     }
+
+
+@app.get("/api/llm/metrics")
+async def get_llm_metrics():
+    """Get LLM usage metrics (tokens, latency, speed)."""
+    from src.llm.metrics import snapshot as llm_snapshot
+    return {"metrics": llm_snapshot()}
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -1926,20 +2018,27 @@ async def update_settings(request: SettingsUpdateRequest):
         save_api_key(user_id=1, provider=provider, api_key=api_key_value, model_name=request.llm_model)
         
         # Also apply to runtime settings
-        if provider in ("openai", "deepseek"):
+        if provider == "openai":
             settings.openai_api_key = api_key_value
+        elif provider == "deepseek":
+            settings.deepseek_api_key = api_key_value
         elif provider == "anthropic":
             settings.anthropic_api_key = api_key_value
         elif provider == "groq":
             settings.groq_api_key = api_key_value
+        elif provider == "gemini":
+            settings.gemini_api_key = api_key_value
         
-        # Update LLM provider setting
-        provider_map = {"openai": "openai", "deepseek": "openai", "anthropic": "anthropic", "groq": "groq", "gemini": "openai"}
+        # Update LLM provider enum
         try:
             from src.config.settings import LLMProvider
-            settings.llm_provider = LLMProvider(provider_map.get(provider, "openai"))
-        except Exception:
+            settings.llm_provider = LLMProvider(provider)
+        except (ValueError, KeyError):
             pass
+        
+        # Reset LLM factory so next call creates client with new provider
+        from src.llm import LLMFactory
+        LLMFactory.reset()
         
         updated["llm_api_key"] = "saved"
         updated["llm_provider"] = provider
@@ -1949,12 +2048,25 @@ async def update_settings(request: SettingsUpdateRequest):
         # Just switching provider, load key from DB
         db_key = get_api_key_decrypted(user_id=1, provider=request.llm_provider)
         if db_key:
-            if request.llm_provider in ("openai", "deepseek"):
+            if request.llm_provider == "openai":
                 settings.openai_api_key = db_key
+            elif request.llm_provider == "deepseek":
+                settings.deepseek_api_key = db_key
             elif request.llm_provider == "anthropic":
                 settings.anthropic_api_key = db_key
             elif request.llm_provider == "groq":
                 settings.groq_api_key = db_key
+            elif request.llm_provider == "gemini":
+                settings.gemini_api_key = db_key
+            
+            try:
+                from src.config.settings import LLMProvider
+                settings.llm_provider = LLMProvider(request.llm_provider)
+            except (ValueError, KeyError):
+                pass
+            
+            from src.llm import LLMFactory
+            LLMFactory.reset()
             updated["llm_provider"] = request.llm_provider
     
     if request.llm_enabled is not None:
@@ -1997,12 +2109,19 @@ async def delete_api_key_endpoint(provider: str):
     
     if deleted:
         # Clear from runtime settings too
-        if provider in ("openai", "deepseek"):
+        if provider == "openai":
             settings.openai_api_key = None
+        elif provider == "deepseek":
+            settings.deepseek_api_key = None
         elif provider == "anthropic":
             settings.anthropic_api_key = None
         elif provider == "groq":
             settings.groq_api_key = None
+        elif provider == "gemini":
+            settings.gemini_api_key = None
+        
+        from src.llm import LLMFactory
+        LLMFactory.reset()
         logger.info(f"API key deleted for provider: {provider}")
         return {"success": True, "message": f"{provider} API key deleted"}
     

@@ -4,6 +4,7 @@ Supports OpenAI API and compatible endpoints (Azure, local proxies)
 """
 
 import json
+import time
 from typing import List, Dict, Any, Optional
 from loguru import logger
 
@@ -16,6 +17,7 @@ except ImportError:
 from .base import (
     BaseLLMClient, Message, LLMResponse, TradingDecision, MessageRole
 )
+from . import metrics as llm_metrics
 
 
 class OpenAIClient(BaseLLMClient):
@@ -30,13 +32,15 @@ class OpenAIClient(BaseLLMClient):
         model: str = "gpt-4-turbo-preview",
         base_url: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        provider_name: str = "openai"
     ):
         super().__init__(model, temperature, max_tokens)
         
         if AsyncOpenAI is None:
             raise ImportError("OpenAI library not installed. Run: pip install openai")
         
+        self.provider_name = provider_name
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url
@@ -49,6 +53,9 @@ class OpenAIClient(BaseLLMClient):
         max_tokens: Optional[int] = None
     ) -> LLMResponse:
         """Send chat messages to OpenAI."""
+        provider = self.provider_name
+        llm_metrics.record_request(provider, self.model)
+        start_time = time.time()
         try:
             formatted_messages = [
                 {"role": msg.role.value, "content": msg.content}
@@ -62,6 +69,14 @@ class OpenAIClient(BaseLLMClient):
                 max_tokens=max_tokens or self.max_tokens
             )
             
+            latency_ms = int((time.time() - start_time) * 1000)
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+            llm_metrics.record_success(provider, self.model, latency_ms, usage)
+            
             return LLMResponse(
                 content=response.choices[0].message.content,
                 model=response.model,
@@ -73,6 +88,7 @@ class OpenAIClient(BaseLLMClient):
             )
             
         except Exception as e:
+            llm_metrics.record_error(provider, self.model, str(e))
             logger.error(f"OpenAI chat error: {str(e)}")
             raise
     

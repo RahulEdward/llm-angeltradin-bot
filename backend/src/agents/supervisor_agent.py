@@ -59,6 +59,19 @@ class SupervisorAgent(BaseAgent):
         symbols = self._symbols
         exchanges = self.config.get("exchanges", {s: "NSE" for s in symbols})
 
+        # ─── Create ONE shared broker instance for all agents ───
+        from ..broker import BrokerFactory
+        shared_broker = BrokerFactory.get_instance()
+        if not shared_broker:
+            shared_broker = BrokerFactory.create()
+        if shared_broker:
+            try:
+                if not await shared_broker.is_connected():
+                    await shared_broker.connect()
+            except Exception as e:
+                logger.warning(f"Shared broker connect: {e}")
+        logger.info(f"Shared broker: {type(shared_broker).__name__ if shared_broker else 'None'} id={id(shared_broker) if shared_broker else 0}")
+
         # Create agents
         self._agents["market_data"] = MarketDataAgent(config={
             "symbols": symbols, "exchanges": exchanges,
@@ -91,7 +104,7 @@ class SupervisorAgent(BaseAgent):
 
         self._agent_order = ["market_data", "strategy", "risk_manager", "execution"]
 
-        # Initialize all agents
+        # Initialize all agents — they will pick up the shared broker from factory
         for name, agent in self._agents.items():
             try:
                 if hasattr(agent, 'initialize'):
@@ -102,6 +115,12 @@ class SupervisorAgent(BaseAgent):
                         logger.info(f"Initialized {name}")
             except Exception as e:
                 logger.error(f"Failed to initialize {name}: {e}")
+
+        # Force-inject the shared broker into execution agent to guarantee same instance
+        exec_agent = self._agents.get("execution")
+        if exec_agent and shared_broker:
+            exec_agent._broker = shared_broker
+            logger.info(f"Injected shared broker into ExecutionAgent id={id(shared_broker)}")
 
         logger.info("All agents initialized (Market + Strategy + Risk + Execution + Reflection)")
         return True
@@ -302,5 +321,8 @@ class SupervisorAgent(BaseAgent):
     async def run_backtest(self, **kwargs) -> Any:
         backtest_agent = self._agents.get("backtest")
         if backtest_agent and isinstance(backtest_agent, BacktestAgent):
+            # Ensure symbols is a list
+            if "symbol" in kwargs and "symbols" not in kwargs:
+                kwargs["symbols"] = [kwargs.pop("symbol")]
             return await backtest_agent.run_backtest(**kwargs)
         raise RuntimeError("Backtest agent not available")
