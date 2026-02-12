@@ -1,6 +1,7 @@
 """
 Execution Agent
-Responsible for order placement and position management
+Responsible for order placement and position management.
+Handles both live and paper broker, and gracefully handles no-broker scenarios.
 """
 
 from datetime import datetime
@@ -9,7 +10,7 @@ import uuid
 from loguru import logger
 
 from .base import BaseAgent, AgentType, AgentMessage, MessageType
-from ..broker import BrokerFactory, BaseBroker, OrderRequest, OrderSide, OrderType, ProductType
+from ..broker import BrokerFactory, BaseBroker, OrderRequest, OrderSide, OrderType, ProductType, OrderStatus
 from ..config.settings import settings, TradingMode
 
 
@@ -21,7 +22,6 @@ class ExecutionAgent(BaseAgent):
     
     def __init__(self, name: str = "ExecutionAgent", config: Optional[Dict[str, Any]] = None):
         super().__init__(name, AgentType.EXECUTION, config or {})
-        
         self._broker: Optional[BaseBroker] = None
         self._pending_orders: Dict[str, Dict] = {}
         self._executed_trades: List[Dict] = []
@@ -30,24 +30,38 @@ class ExecutionAgent(BaseAgent):
         self._broker = BrokerFactory.get_instance()
         if not self._broker:
             self._broker = BrokerFactory.create()
-        
         if self._broker:
             try:
                 if not await self._broker.is_connected():
                     connected = await self._broker.connect()
                     if not connected:
-                        logger.warning("Broker not connected - ExecutionAgent will wait")
+                        logger.warning("Broker not connected - ExecutionAgent will retry each cycle")
             except Exception as e:
                 logger.warning(f"Broker connection check failed: {e}")
         else:
-            logger.warning("No broker available - ExecutionAgent running in limited mode")
-        
+            logger.warning("No broker available - ExecutionAgent will retry each cycle")
         logger.info(f"ExecutionAgent initialized - Mode: {settings.trading_mode.value}")
         return True
+
+    async def _ensure_broker(self) -> bool:
+        """Try to get a working broker. Returns True if broker is ready."""
+        # Always get the singleton from factory (same instance MarketDataAgent syncs prices to)
+        shared = BrokerFactory.get_instance()
+        if shared:
+            self._broker = shared
+        
+        if self._broker:
+            try:
+                if await self._broker.is_connected():
+                    return True
+                connected = await self._broker.connect()
+                return connected
+            except Exception:
+                return False
+        return False
     
     async def process_cycle(self) -> List[AgentMessage]:
         messages = []
-        
         for msg in self.get_pending_messages():
             if msg.type == MessageType.DECISION:
                 result = await self._execute_decision(msg.payload)
@@ -57,10 +71,7 @@ class ExecutionAgent(BaseAgent):
                     payload=result,
                     priority=2
                 ))
-        
-        # Update pending orders status
         await self._update_order_status()
-        
         return messages
     
     async def handle_message(self, message: AgentMessage) -> Optional[AgentMessage]:
@@ -76,14 +87,14 @@ class ExecutionAgent(BaseAgent):
         return None
     
     async def shutdown(self) -> None:
-        # Cancel any pending orders
-        for order_id in list(self._pending_orders.keys()):
-            try:
-                await self._broker.cancel_order(order_id)
-            except:
-                pass
+        if self._broker:
+            for order_id in list(self._pending_orders.keys()):
+                try:
+                    await self._broker.cancel_order(order_id)
+                except Exception:
+                    pass
         logger.info("ExecutionAgent shutdown")
-    
+
     async def _execute_decision(self, decision: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a trading decision."""
         result = {
@@ -93,6 +104,13 @@ class ExecutionAgent(BaseAgent):
             "action": decision.get("action", ""),
             "timestamp": datetime.now().isoformat()
         }
+        
+        # Ensure broker is available
+        broker_ready = await self._ensure_broker()
+        if not broker_ready:
+            result["error"] = "No broker available - connect broker in Settings or wait for paper broker"
+            logger.warning(f"Execution skipped for {result['symbol']}: no broker")
+            return result
         
         try:
             action = decision.get("action", "").upper()
@@ -109,15 +127,12 @@ class ExecutionAgent(BaseAgent):
             # Calculate quantity
             position_size = decision.get("risk_assessment", {}).get("position_size", 1)
             if isinstance(position_size, float) and position_size <= 1:
-                # It's a percentage
                 max_pos = settings.max_position_size
                 quantity = int((max_pos * position_size) / entry_price) if entry_price > 0 else 1
             else:
                 quantity = int(position_size)
-            
             quantity = max(1, quantity)
             
-            # Create order request
             order = OrderRequest(
                 symbol=symbol,
                 exchange=exchange,
@@ -128,7 +143,6 @@ class ExecutionAgent(BaseAgent):
                 tag=f"LLM_{result['trade_id']}"
             )
             
-            # Place main order
             order_result = await self._broker.place_order(order)
             
             if order_result.success:
@@ -141,8 +155,7 @@ class ExecutionAgent(BaseAgent):
                 # Place stop loss order
                 if stop_loss:
                     sl_order = OrderRequest(
-                        symbol=symbol,
-                        exchange=exchange,
+                        symbol=symbol, exchange=exchange,
                         side=OrderSide.SELL if action == "BUY" else OrderSide.BUY,
                         quantity=quantity,
                         order_type=OrderType.STOP_LOSS_MARKET,
@@ -153,7 +166,6 @@ class ExecutionAgent(BaseAgent):
                     sl_result = await self._broker.place_order(sl_order)
                     result["sl_order_id"] = sl_result.order_id if sl_result.success else None
                 
-                # Store trade
                 self._executed_trades.append(result)
                 logger.info(f"Order executed: {symbol} {action} {quantity} @ ₹{result['fill_price']:.2f}")
             else:
@@ -167,7 +179,8 @@ class ExecutionAgent(BaseAgent):
         return result
     
     async def _update_order_status(self) -> None:
-        """Update status of pending orders."""
+        if not self._broker:
+            return
         for order_id in list(self._pending_orders.keys()):
             try:
                 status = await self._broker.get_order_status(order_id)
@@ -175,25 +188,26 @@ class ExecutionAgent(BaseAgent):
                     self._pending_orders[order_id]["status"] = status.status.value
                     if status.status.value in ["FILLED", "CANCELLED", "REJECTED"]:
                         del self._pending_orders[order_id]
-            except:
+            except Exception:
                 pass
     
     async def get_positions(self) -> List[Dict]:
-        """Get current positions."""
         if self._broker:
-            positions = await self._broker.get_positions()
-            return [{"symbol": p.symbol, "quantity": p.quantity, "pnl": p.pnl} for p in positions]
+            try:
+                positions = await self._broker.get_positions()
+                return [{"symbol": p.symbol, "quantity": p.quantity, "pnl": p.pnl} for p in positions]
+            except Exception:
+                pass
         return []
     
     async def close_position(self, symbol: str, exchange: str = "NSE") -> Dict[str, Any]:
-        """Close an open position."""
+        if not self._broker:
+            return {"success": False, "message": "No broker available"}
         positions = await self._broker.get_positions()
-        
         for pos in positions:
             if pos.symbol == symbol:
                 order = OrderRequest(
-                    symbol=symbol,
-                    exchange=exchange,
+                    symbol=symbol, exchange=exchange,
                     side=OrderSide.SELL if pos.side == OrderSide.BUY else OrderSide.BUY,
                     quantity=pos.quantity,
                     order_type=OrderType.MARKET,
@@ -201,5 +215,4 @@ class ExecutionAgent(BaseAgent):
                 )
                 result = await self._broker.place_order(order)
                 return {"success": result.success, "message": result.message}
-        
         return {"success": False, "message": "Position not found"}

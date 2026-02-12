@@ -7,6 +7,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import json
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -94,6 +96,12 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"LLM re-init after key load failed: {e}")
     except Exception as e:
         logger.warning(f"Failed to load API keys from DB: {e}")
+    
+    # Fetch master contract symbols BEFORE supervisor init (public URL, no broker needed)
+    try:
+        await fetch_symbols_public()
+    except Exception as e:
+        logger.warning(f"Symbol fetch on startup: {e}")
     
     supervisor = SupervisorAgent(config={
         "symbols": ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"],
@@ -347,26 +355,28 @@ async def set_mode(request: TradingModeRequest):
             logger.info(f"Mode switching: {old_mode.value} → {mode.value}")
             logger.info(f"Connected brokers: {list(connected_brokers.keys())}")
             
-            if mode == TradingMode.LIVE:
-                # Live mode — check if broker is actually connected
-                if len(connected_brokers) == 0:
-                    logger.warning("Switched to LIVE but no broker connected!")
-                    return {
-                        "mode": mode.value, 
-                        "message": "Switched to Live mode. Connect broker in Settings to see real data.",
-                        "broker_connected": False
-                    }
-                else:
-                    logger.info("Live mode: using existing connected broker session")
-            else:
-                # Paper/Backtest — recreate broker
-                broker = BrokerFactory.create(mode)
-                if broker:
-                    try:
+            # Always recreate broker instance for the new mode
+            broker = BrokerFactory.create(mode)
+            if broker:
+                try:
+                    if not await broker.is_connected():
                         await broker.connect()
-                    except Exception as e:
-                        logger.warning(f"Broker connect on mode switch: {e}")
-                    logger.info(f"Broker recreated for {mode.value} mode")
+                except Exception as e:
+                    logger.warning(f"Broker connect on mode switch: {e}")
+                logger.info(f"Broker recreated for {mode.value} mode: {type(broker).__name__}")
+            
+            if mode == TradingMode.LIVE and len(connected_brokers) == 0:
+                logger.warning("Switched to LIVE but no broker connected!")
+                return {
+                    "mode": mode.value, 
+                    "message": "Switched to Live mode. Connect broker in Settings to see real data.",
+                    "broker_connected": False
+                }
+            
+            # Refresh supervisor's market data agent broker reference
+            if supervisor and supervisor._agents.get("market_data"):
+                supervisor._agents["market_data"]._broker = BrokerFactory.get_instance()
+                logger.info(f"Refreshed MarketDataAgent broker: {type(supervisor._agents['market_data']._broker).__name__}")
         
         logger.info(f"Trading mode switched to: {mode.value}")
         return {
@@ -378,6 +388,62 @@ async def set_mode(request: TradingModeRequest):
         raise HTTPException(status_code=400, detail=f"Invalid mode: {request.mode}")
 
 
+@app.post("/api/config/update")
+async def update_config(config: Dict[str, Any]):
+    """Update active trading configuration (symbols, exchange)."""
+    if not supervisor:
+        raise HTTPException(status_code=503, detail="System not initialized")
+    
+    try:
+        symbols = config.get("symbols")
+        if symbols is not None:
+            # Update supervisor config
+            supervisor.config["symbols"] = symbols
+            
+            # Update MarketDataAgent
+            market_agent = supervisor.get_agent("market_data")
+            if market_agent:
+                market_agent.symbols = symbols
+                
+                # Update exchanges map if provided
+                exchanges = config.get("exchanges")
+                if exchanges:
+                    market_agent.exchanges = exchanges
+                elif config.get("exchange"):
+                    # diverse symbols all on one exchange
+                    exch = config.get("exchange")
+                    market_agent.exchanges = {s: exch for s in symbols}
+                
+                logger.info(f"Updated config: {len(symbols)} symbols")
+                
+        return {"status": "success", "count": len(symbols) if symbols else 0}
+        
+    except Exception as e:
+        logger.error(f"Config update failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/broker/symbols")
+async def get_broker_symbols():
+    """Get list of available trading symbols."""
+    try:
+        # Use absolute path to data directory
+        symbols_file = Path(__file__).parent / "data" / "symbols.json"
+        
+        if symbols_file.exists() and symbols_file.stat().st_size > 100:
+            content = symbols_file.read_text()
+            return json.loads(content)
+        else:
+            # Fallback to default list if file missing or empty
+            return [
+                {"symbol": s, "exchange": "NSE", "token": "", "lotsize": "1"} 
+                for s in ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
+            ]
+    except Exception as e:
+        logger.error(f"Error reading symbols: {e}")
+        return []
+
+
 # ============================================
 # Trading Control
 # ============================================
@@ -387,6 +453,26 @@ async def start_trading():
     """Start the multi-agent trading loop (reference-repo style)."""
     if not supervisor:
         raise HTTPException(status_code=503, detail="System not initialized")
+    
+    # ─── Ensure correct broker for current mode ───
+    current_broker = BrokerFactory.get_instance()
+    mode = settings.trading_mode
+    
+    # Recreate broker if mode doesn't match instance type
+    if mode == TradingMode.LIVE and current_broker and type(current_broker).__name__ == "PaperBroker":
+        logger.info("Mode is LIVE but broker is PaperBroker — recreating...")
+        BrokerFactory.create(mode)
+    elif mode == TradingMode.PAPER and current_broker and type(current_broker).__name__ != "PaperBroker":
+        logger.info("Mode is PAPER but broker is not PaperBroker — recreating...")
+        BrokerFactory.create(mode)
+    
+    # Refresh broker reference in MarketDataAgent
+    fresh_broker = BrokerFactory.get_instance()
+    if supervisor._agents.get("market_data"):
+        supervisor._agents["market_data"]._broker = fresh_broker
+    if supervisor._agents.get("execution"):
+        supervisor._agents["execution"]._broker = fresh_broker
+    logger.info(f"Trading start: mode={mode.value}, broker={type(fresh_broker).__name__ if fresh_broker else 'None'}")
     
     # ─── Boot Messages (like reference-repo) ───
     await agent_ws_manager.send_agent_message("System", "**System initialized.** All agents are online and ready for parallel execution.")
@@ -562,6 +648,92 @@ async def stop_trading():
     supervisor._is_running = False
     await agent_ws_manager.send_agent_message("Supervisor", "🛑 Trading stopped by user")
     return {"status": "stopped"}
+
+
+@app.get("/api/orders")
+async def get_orders():
+    """Get order book with status for each order."""
+    smart_api = get_connected_smart_api()
+    
+    if smart_api:
+        try:
+            response = await asyncio.to_thread(smart_api.orderBook)
+            if response.get("status") and response.get("data"):
+                orders = []
+                for order in response["data"]:
+                    orders.append({
+                        "order_id": order.get("orderid", ""),
+                        "symbol": order.get("tradingsymbol", ""),
+                        "exchange": order.get("exchange", ""),
+                        "side": order.get("transactiontype", ""),
+                        "quantity": int(order.get("quantity", 0)),
+                        "price": float(order.get("price", 0)),
+                        "avg_price": float(order.get("averageprice", 0)),
+                        "status": order.get("status", "unknown"),
+                        "order_type": order.get("ordertype", ""),
+                        "product_type": order.get("producttype", ""),
+                        "time": order.get("updatetime", order.get("ordervaliditydate", "")),
+                        "text": order.get("text", ""),
+                    })
+                return {"status": "success", "orders": orders}
+            return {"status": "success", "orders": []}
+        except Exception as e:
+            logger.error(f"Order book error: {e}")
+            return {"status": "error", "message": str(e), "orders": []}
+    
+    # Paper mode - return executed trades from supervisor
+    if supervisor and supervisor._agents.get("execution"):
+        exec_agent = supervisor._agents["execution"]
+        trades = getattr(exec_agent, "_executed_trades", [])
+        orders = []
+        for t in trades:
+            orders.append({
+                "order_id": t.get("order_id", t.get("trade_id", "")),
+                "symbol": t.get("symbol", ""),
+                "exchange": "NSE",
+                "side": t.get("action", ""),
+                "quantity": t.get("quantity", 0),
+                "price": 0,
+                "avg_price": t.get("fill_price", 0),
+                "status": "complete" if t.get("success") else "rejected",
+                "order_type": "MARKET",
+                "product_type": "INTRADAY",
+                "time": t.get("timestamp", ""),
+                "text": t.get("error", "Paper trade executed"),
+            })
+        return {"status": "success", "orders": orders, "mode": "paper"}
+    
+    return {"status": "success", "orders": [], "message": "No broker connected"}
+
+
+@app.get("/api/tradebook")
+async def get_tradebook():
+    """Get trade book from broker."""
+    smart_api = get_connected_smart_api()
+    
+    if smart_api:
+        try:
+            response = await asyncio.to_thread(smart_api.tradeBook)
+            if response.get("status") and response.get("data"):
+                trades = []
+                for trade in response["data"]:
+                    trades.append({
+                        "trade_id": trade.get("tradeid", ""),
+                        "order_id": trade.get("orderid", ""),
+                        "symbol": trade.get("tradingsymbol", ""),
+                        "exchange": trade.get("exchange", ""),
+                        "side": trade.get("transactiontype", ""),
+                        "quantity": int(trade.get("quantity", 0)),
+                        "price": float(trade.get("price", 0)),
+                        "fill_time": trade.get("filltime", ""),
+                    })
+                return {"status": "success", "trades": trades}
+            return {"status": "success", "trades": []}
+        except Exception as e:
+            logger.error(f"Trade book error: {e}")
+            return {"status": "error", "message": str(e), "trades": []}
+    
+    return {"status": "success", "trades": [], "message": "No broker connected"}
 
 
 @app.post("/api/trading/cycle")
@@ -1494,42 +1666,48 @@ async def disconnect_broker(account_id: str):
 async def fetch_symbols_public(force: bool = False):
     """Fetch NSE equity symbols from Angel One's public ScripMaster URL.
     No broker auth needed — this is a public endpoint.
-    Skips if symbols.json exists and is less than 24h old (unless force=True).
+    Skips if symbols.json exists, has content, and is less than 24h old (unless force=True).
     """
     import os, time
     symbols_file = Path(__file__).parent / "data" / "symbols.json"
 
-    # Skip if fresh file exists (< 24h old) and not forced
+    # Skip if fresh file exists (< 24h old), has real content, and not forced
     if not force and symbols_file.exists():
         file_age = time.time() - os.path.getmtime(str(symbols_file))
-        if file_age < 86400:  # 24 hours
-            logger.info(f"symbols.json is fresh ({file_age/3600:.1f}h old), skipping fetch")
+        file_size = os.path.getsize(str(symbols_file))
+        if file_age < 86400 and file_size > 100:  # 24 hours AND has actual data
+            logger.info(f"symbols.json is fresh ({file_age/3600:.1f}h old, {file_size} bytes), skipping fetch")
             return
 
     try:
         import requests
         instruments_url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
         logger.info("Fetching symbols from Angel One ScripMaster (public URL)...")
-        response = await asyncio.to_thread(requests.get, instruments_url, timeout=60)
+        response = await asyncio.to_thread(requests.get, instruments_url, timeout=120)
 
         if response.ok:
             instruments = response.json()
 
-            # Filter NSE equity symbols
-            nse_symbols = [
+            # Filter NSE + BSE equity symbols
+            equity_symbols = [
                 {
                     "token": inst["token"],
                     "symbol": inst["symbol"],
-                    "name": inst["name"],
-                    "exchange": inst["exch_seg"]
+                    "name": inst.get("name", inst["symbol"]),
+                    "exchange": inst["exch_seg"],
+                    "lotsize": inst.get("lotsize", "1"),
+                    "tick_size": inst.get("tick_size", "0.05")
                 }
                 for inst in instruments
-                if inst.get("exch_seg") == "NSE" and inst.get("instrumenttype") == "EQ"
-            ][:500]  # Limit to 500 for performance
+                if inst.get("exch_seg") in ("NSE", "BSE") and inst.get("instrumenttype") == ""
+            ]
 
-            symbols_file.parent.mkdir(parents=True, exist_ok=True)
-            symbols_file.write_text(json.dumps(nse_symbols, indent=2))
-            logger.info(f"Fetched and saved {len(nse_symbols)} NSE symbols")
+            if equity_symbols:
+                symbols_file.parent.mkdir(parents=True, exist_ok=True)
+                symbols_file.write_text(json.dumps(equity_symbols, indent=2))
+                logger.info(f"Fetched and saved {len(equity_symbols)} NSE+BSE equity symbols")
+            else:
+                logger.warning("No equity symbols found in ScripMaster data")
         else:
             logger.warning(f"Symbol fetch HTTP error: {response.status_code}")
     except Exception as e:
@@ -1551,32 +1729,7 @@ async def fetch_symbols_background(account_id: str):
         logger.error(f"Symbol fetch failed: {e}")
 
 
-@app.get("/api/broker/symbols")
-async def get_symbols():
-    """Get available symbols."""
-    symbols_file = Path(__file__).parent / "data" / "symbols.json"
-    
-    if symbols_file.exists():
-        try:
-            return {"symbols": json.loads(symbols_file.read_text())}
-        except:
-            pass
-    
-    # Return default symbols
-    return {
-        "symbols": [
-            {"token": "2885", "symbol": "RELIANCE", "name": "RELIANCE INDUSTRIES", "exchange": "NSE"},
-            {"token": "1594", "symbol": "INFY", "name": "INFOSYS LTD", "exchange": "NSE"},
-            {"token": "11536", "symbol": "TCS", "name": "TATA CONSULTANCY SERVICES", "exchange": "NSE"},
-            {"token": "1333", "symbol": "HDFCBANK", "name": "HDFC BANK LTD", "exchange": "NSE"},
-            {"token": "4963", "symbol": "ICICIBANK", "name": "ICICI BANK LTD", "exchange": "NSE"},
-            {"token": "3045", "symbol": "SBIN", "name": "STATE BANK OF INDIA", "exchange": "NSE"},
-            {"token": "881", "symbol": "KOTAKBANK", "name": "KOTAK MAHINDRA BANK", "exchange": "NSE"},
-            {"token": "3456", "symbol": "TATAMOTORS", "name": "TATA MOTORS LTD", "exchange": "NSE"},
-            {"token": "2475", "symbol": "ONGC", "name": "OIL AND NATURAL GAS CORP", "exchange": "NSE"},
-            {"token": "467", "symbol": "HINDUNILVR", "name": "HINDUSTAN UNILEVER", "exchange": "NSE"}
-        ]
-    }
+# Note: /api/broker/symbols is defined earlier (line ~426) and returns the full symbols list
 
 
 @app.post("/api/symbols/refresh")

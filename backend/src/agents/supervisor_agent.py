@@ -12,6 +12,7 @@ Reference-repo flow with all 7 agent functionalities:
   Step 5: ReflectionAgent (The Philosopher) - Trade retrospection every N trades
 
 All steps broadcast to Agent Chatroom via WebSocket.
+Optional agents registered via AgentRegistry for lazy init.
 """
 
 import asyncio
@@ -25,7 +26,10 @@ from .strategy_agent import StrategyAgent
 from .risk_manager_agent import RiskManagerAgent
 from .execution_agent import ExecutionAgent
 from .backtest_agent import BacktestAgent
-from .reflection_agent import ReflectionAgent
+from .reflection_agent import ReflectionAgent, ReflectionAgentLLM
+from .decision_core_agent import DecisionCoreAgent
+from .agent_config import AgentConfig
+from .agent_registry import AgentRegistry
 from ..config.settings import settings, TradingMode
 
 
@@ -91,16 +95,35 @@ class SupervisorAgent(BaseAgent):
         self._agents["execution"] = ExecutionAgent()
         self._agents["backtest"] = BacktestAgent()
 
-        # New: Reflection Agent (The Philosopher)
+        # ─── AgentRegistry for optional agents ───
+        agent_config_dict = self.config.get("agent_config", {})
+        agent_cfg = AgentConfig.from_dict(agent_config_dict) if agent_config_dict else AgentConfig()
+        self._registry = AgentRegistry(agent_cfg)
+
+        # Register optional agents
+        self._registry.register_class('decision_core', DecisionCoreAgent)
+        self._registry.register_class('reflection_llm', ReflectionAgentLLM)
+        self._registry.register_class('reflection', ReflectionAgent)
+
+        # Initialize optional agents via registry
+        self._registry.initialize_all()
+
+        # Reflection Agent (The Philosopher) — prefer LLM, fallback to rule-based
         use_llm = self.config.get("use_llm", True)
-        llm_client = None
+        reflection = None
         if use_llm:
-            try:
-                from ..llm import LLMFactory
-                llm_client = LLMFactory.get_or_create()
-            except Exception:
-                pass
-        self._agents["reflection"] = ReflectionAgent(use_llm=bool(llm_client), llm_client=llm_client)
+            reflection = self._registry.get('reflection_llm')
+        if reflection is None:
+            reflection = self._registry.get('reflection')
+        if reflection is None:
+            reflection = ReflectionAgent()  # Guaranteed fallback
+        self._agents["reflection"] = reflection
+
+        # Decision Core Agent
+        decision_core = self._registry.get('decision_core')
+        if decision_core is None:
+            decision_core = DecisionCoreAgent()
+        self._agents["decision_core"] = decision_core
 
         self._agent_order = ["market_data", "strategy", "risk_manager", "execution"]
 
@@ -122,7 +145,10 @@ class SupervisorAgent(BaseAgent):
             exec_agent._broker = shared_broker
             logger.info(f"Injected shared broker into ExecutionAgent id={id(shared_broker)}")
 
-        logger.info("All agents initialized (Market + Strategy + Risk + Execution + Reflection)")
+        logger.info(
+            f"All agents initialized (Market + Strategy + Risk + Execution + Reflection + DecisionCore) "
+            f"| Registry: {self._registry}"
+        )
         return True
 
     async def process_cycle(self) -> List[AgentMessage]:
@@ -237,7 +263,11 @@ class SupervisorAgent(BaseAgent):
     async def _maybe_reflect(self, cycle_messages: List[AgentMessage]):
         """Check if reflection should be triggered."""
         reflection_agent = self._agents.get("reflection")
-        if not reflection_agent or not isinstance(reflection_agent, ReflectionAgent):
+        if not reflection_agent:
+            return
+
+        # Support both ReflectionAgent and ReflectionAgentLLM
+        if not hasattr(reflection_agent, 'should_reflect'):
             return
 
         if reflection_agent.should_reflect(self._total_executed_trades) and self._recent_trades:
@@ -313,6 +343,7 @@ class SupervisorAgent(BaseAgent):
             "total_trades": self._total_executed_trades,
             "agents": {name: agent.get_status() for name, agent in self._agents.items()
                        if hasattr(agent, 'get_status')},
+            "registry": self._registry.get_status() if hasattr(self, '_registry') else {},
         }
 
     def get_agent(self, name: str) -> Optional[BaseAgent]:

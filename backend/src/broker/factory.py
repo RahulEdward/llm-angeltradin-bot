@@ -49,7 +49,6 @@ class BrokerFactory:
         
         # ALWAYS reuse existing instance for paper mode
         if cls._instance is not None:
-            from .paper_broker import PaperBroker
             if mode == TradingMode.PAPER and isinstance(cls._instance, PaperBroker):
                 logger.debug(f"Reusing existing PaperBroker id={id(cls._instance)}")
                 return cls._instance

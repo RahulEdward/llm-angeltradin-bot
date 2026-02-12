@@ -5,6 +5,7 @@ Production-ready integration with Angel One's trading platform
 
 import asyncio
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 import pyotp
 from loguru import logger
@@ -94,6 +95,7 @@ class AngelOneBroker(BaseBroker):
         
         # Symbol token cache
         self._symbol_cache: Dict[str, str] = {}
+        self._symbol_name_cache: Dict[str, str] = {}  # Maps "NSE:RELIANCE" -> "RELIANCE-EQ"
         
     async def connect(self) -> bool:
         """Establish connection with Angel One API."""
@@ -200,10 +202,23 @@ class AngelOneBroker(BaseBroker):
                     order.symbol, order.exchange
                 )
             
-            # Build order params
+            if not symbol_token:
+                return OrderResult(
+                    success=False,
+                    message=f"Could not resolve token for {order.exchange}:{order.symbol}",
+                    status=OrderStatus.REJECTED
+                )
+            
+            # Use resolved trading symbol (e.g., RELIANCE-EQ)
+            cache_key = f"{order.exchange}:{order.symbol}"
+            trading_symbol = self._symbol_name_cache.get(cache_key, order.symbol)
+            
+            logger.info(f"Placing order: {order.side.value} {trading_symbol} (token={symbol_token}) qty={order.quantity}")
+            
+            # Build order params (matching Angel One API exactly)
             order_params = {
                 "variety": "NORMAL",
-                "tradingsymbol": order.symbol,
+                "tradingsymbol": trading_symbol,
                 "symboltoken": symbol_token,
                 "transactiontype": order.side.value,
                 "exchange": self.EXCHANGE_MAP.get(order.exchange, order.exchange),
@@ -211,6 +226,8 @@ class AngelOneBroker(BaseBroker):
                 "producttype": self.PRODUCT_MAP.get(order.product_type, "INTRADAY"),
                 "duration": "DAY",
                 "quantity": str(order.quantity),
+                "squareoff": "0",
+                "stoploss": "0",
             }
             
             # Add price for limit orders
@@ -509,11 +526,17 @@ class AngelOneBroker(BaseBroker):
         
         try:
             symbol_token = await self.get_symbol_token(symbol, exchange)
+            if not symbol_token:
+                logger.warning(f"No token for {exchange}:{symbol}, cannot fetch quote")
+                return None
+            
+            # Use resolved trading symbol name (e.g. RELIANCE-EQ)
+            trading_symbol = self._symbol_name_cache.get(f"{exchange}:{symbol}", symbol)
             
             response = await asyncio.to_thread(
                 self._client.ltpData,
                 self.EXCHANGE_MAP.get(exchange, exchange),
-                symbol,
+                trading_symbol,
                 symbol_token
             )
             
@@ -535,7 +558,7 @@ class AngelOneBroker(BaseBroker):
             return None
             
         except Exception as e:
-            logger.error(f"Get quote error: {str(e)}")
+            logger.error(f"Get quote error for {exchange}:{symbol}: {str(e)}")
             return None
     
     async def get_historical_data(
@@ -592,33 +615,75 @@ class AngelOneBroker(BaseBroker):
     # ============================================
     
     async def get_symbol_token(self, symbol: str, exchange: str) -> str:
-        """Get broker-specific token for a symbol."""
+        """Get broker-specific token for a symbol using local symbols.json."""
         cache_key = f"{exchange}:{symbol}"
         
         if cache_key in self._symbol_cache:
             return self._symbol_cache[cache_key]
         
-        # Search for the symbol
-        results = await self.search_symbols(symbol)
-        for result in results:
-            if (result.get("symbol") == symbol and 
-                result.get("exch_seg") == exchange):
-                token = result.get("token", "")
-                self._symbol_cache[cache_key] = token
-                return token
+        # ─── Method 1: Local symbols.json lookup (fast & reliable) ───
+        try:
+            symbols_file = Path(__file__).parent.parent.parent / "data" / "symbols.json"
+            if symbols_file.exists():
+                import json
+                symbols_data = json.loads(symbols_file.read_text(encoding="utf-8"))
+                
+                # Search by name (e.g., "RELIANCE") and exchange
+                for entry in symbols_data:
+                    entry_name = entry.get("name", "")
+                    entry_sym = entry.get("symbol", "")
+                    entry_exch = entry.get("exchange", "")
+                    
+                    if entry_name == symbol and entry_exch == exchange:
+                        token = entry.get("token", "")
+                        if token:
+                            self._symbol_cache[cache_key] = token
+                            self._symbol_name_cache[cache_key] = entry_sym  # e.g., "RELIANCE-EQ"
+                            logger.info(f"Symbol resolved from local DB: {cache_key} -> token={token}, trading_symbol={entry_sym}")
+                            return token
+                    
+                    # Also try matching by symbol directly (e.g., "RELIANCE-EQ")
+                    if entry_sym == symbol and entry_exch == exchange:
+                        token = entry.get("token", "")
+                        if token:
+                            self._symbol_cache[cache_key] = token
+                            self._symbol_name_cache[cache_key] = entry_sym
+                            logger.info(f"Symbol resolved from local DB (direct): {cache_key} -> token={token}")
+                            return token
+        except Exception as e:
+            logger.warning(f"Local symbol lookup failed: {e}")
         
-        logger.warning(f"Symbol token not found: {cache_key}")
+        # ─── Method 2: Fall back to API search ───
+        name_variants = [symbol]
+        if exchange in ("NSE", "BSE") and not symbol.endswith(("-EQ", "-BE", "-BL")):
+            name_variants.append(f"{symbol}-EQ")
+        
+        for variant in name_variants:
+            results = await self.search_symbols(variant, exchange)
+            for result in results:
+                result_sym = result.get("symbol", "") or result.get("name", "")
+                result_exch = result.get("exch_seg", result.get("exchange", ""))
+                if result_sym in (symbol, f"{symbol}-EQ") and result_exch == exchange:
+                    token = result.get("token", result.get("symboltoken", ""))
+                    if token:
+                        self._symbol_cache[cache_key] = token
+                        self._symbol_name_cache[cache_key] = result_sym
+                        logger.info(f"Symbol resolved from API: {cache_key} -> {token} (matched {result_sym})")
+                        return token
+        
+        logger.warning(f"Symbol token not found: {cache_key} (tried local DB + API)")
         return ""
     
-    async def search_symbols(self, query: str) -> List[Dict[str, Any]]:
+    async def search_symbols(self, query: str, exchange: str = "NSE") -> List[Dict[str, Any]]:
         """Search for symbols by name or code."""
         if not await self.is_connected():
             return []
         
         try:
+            exch = self.EXCHANGE_MAP.get(exchange, exchange)
             response = await asyncio.to_thread(
                 self._client.searchScrip,
-                "NSE",  # Default exchange
+                exch,
                 query
             )
             

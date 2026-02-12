@@ -103,42 +103,42 @@ class MarketDataAgent(BaseAgent):
         try:
             if broker_available:
                 await self._fetch_real_data()
-                
-                # Calculate indicators for all symbols
-                for symbol in self.symbols:
-                    exchange = self.exchanges.get(symbol, "NSE")
-                    indicators = await self._calculate_indicators(symbol, exchange)
-                    self._indicators[f"{exchange}:{symbol}"] = indicators
-                
-                # Create market snapshot message
-                snapshot = {
-                    "quotes": self._market_data,
-                    "indicators": self._indicators,
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "broker"
-                }
-                
-                messages.append(AgentMessage(
-                    type=MessageType.MARKET_UPDATE,
-                    source_agent=self.name,
-                    payload=snapshot,
-                    priority=1
-                ))
+                data_source = "broker"
+                # Fallback: if real data returned 0 quotes, use simulated data
+                if not self._market_data:
+                    logger.warning("Broker connected but 0 quotes fetched — falling back to simulated data")
+                    await self._generate_simulated_data()
+                    data_source = "simulated"
             else:
-                # No broker — send a "no data" message
-                messages.append(AgentMessage(
-                    type=MessageType.STATE_UPDATE,
-                    source_agent=self.name,
-                    payload={
-                        "status": "no_broker",
-                        "message": "⚠️ Connect broker in Settings for live market data"
-                    }
-                ))
+                # No broker — generate simulated data for Paper mode
+                await self._generate_simulated_data()
+                data_source = "simulated"
+            
+            # Calculate indicators for all symbols
+            for symbol in self.symbols:
+                exchange = self.exchanges.get(symbol, "NSE")
+                indicators = await self._calculate_indicators(symbol, exchange)
+                self._indicators[f"{exchange}:{symbol}"] = indicators
+            
+            # Create market snapshot message
+            snapshot = {
+                "quotes": self._market_data,
+                "indicators": self._indicators,
+                "timestamp": datetime.now().isoformat(),
+                "source": data_source
+            }
+            
+            messages.append(AgentMessage(
+                type=MessageType.MARKET_UPDATE,
+                source_agent=self.name,
+                payload=snapshot,
+                priority=1
+            ))
             
             self.update_metrics(
                 symbols_tracked=len(self.symbols),
                 last_fetch=datetime.now().isoformat(),
-                data_source="broker" if broker_available else "none"
+                data_source=data_source
             )
             
         except Exception as e:
@@ -183,6 +183,118 @@ class MarketDataAgent(BaseAgent):
         
         # Sync prices to paper broker for order execution
         self._sync_prices_to_paper_broker()
+
+    async def _generate_simulated_data(self):
+        """Generate simulated market data (Random Walk) when no broker connected."""
+        import random
+        
+        for symbol in self.symbols:
+            exchange = self.exchanges.get(symbol, "NSE")
+            key = f"{exchange}:{symbol}"
+            
+            # Get previous price or default start price
+            prev_data = self._market_data.get(key, {})
+            current_price = prev_data.get("ltp", 0)
+            
+            if current_price == 0:
+                # Initial random price between 500 and 3000
+                current_price = random.uniform(500, 3000)
+            
+            # Random walk: -0.2% to +0.2% change per cycle
+            change_pct = random.uniform(-0.002, 0.002)
+            new_price = current_price * (1 + change_pct)
+            new_price = round(new_price, 2)
+            
+            # Generate tick data
+            spread = new_price * 0.0005  # 0.05% spread
+            bid = round(new_price - spread, 2)
+            ask = round(new_price + spread, 2)
+            
+            # Update day high/low
+            day_open = prev_data.get("open", new_price)
+            day_high = max(prev_data.get("high", new_price), new_price)
+            day_low = min(prev_data.get("low", new_price), new_price)
+            
+            self._market_data[key] = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "ltp": new_price,
+                "open": day_open,
+                "high": day_high,
+                "low": day_low,
+                "close": day_open,  # treating open as prev close for simplicity
+                "volume": prev_data.get("volume", 0) + random.randint(10, 500),
+                "bid": bid,
+                "ask": ask,
+                "timestamp": datetime.now().isoformat(),
+                "simulated": True
+            }
+            
+            # Generate fake historical data for indicators if needed
+            # (In a real scenario, we'd append this tick to OHLCV history)
+            self._update_simulated_history(symbol, exchange, new_price)
+        
+        # Sync to paper broker so orders execute at these prices
+        self._sync_prices_to_paper_broker()
+
+    def _update_simulated_history(self, symbol: str, exchange: str, price: float):
+        """Append simulated tick to historical data for indicator calculation."""
+        import numpy as np
+        
+        for timeframe in self.timeframes:
+            key = f"{exchange}:{symbol}:{timeframe}"
+            df = self._historical_data.get(key)
+            
+            # Create synthetic history if missing (backfill 50 candles)
+            if df is None or df.empty:
+                rows = []
+                # Timesteps for backfill
+                minutes = {"5m": 5, "15m": 15, "1h": 60}.get(timeframe, 5)
+                end_time = datetime.now()
+                
+                # Random walk backfill
+                curr = price
+                for i in range(50):
+                    ts = end_time - timedelta(minutes=minutes * (50 - i))
+                    change = np.random.normal(0, 0.002) # 0.2% volatility
+                    o = curr
+                    c = curr * (1 + change)
+                    h = max(o, c) * (1 + abs(np.random.normal(0, 0.001)))
+                    l = min(o, c) * (1 - abs(np.random.normal(0, 0.001)))
+                    v = int(np.random.randint(100, 10000))
+                    rows.append({
+                        "timestamp": ts,
+                        "open": o, "high": h, "low": l, "close": c, "volume": v
+                    })
+                    curr = c
+                
+                df = pd.DataFrame(rows)
+                df.set_index("timestamp", inplace=True)
+                self._historical_data[key] = df
+            
+            # Append new candle if enough time passed
+            else:
+                last_ts = df.index[-1]
+                minutes = {"5m": 5, "15m": 15, "1h": 60}.get(timeframe, 5)
+                next_ts = last_ts + timedelta(minutes=minutes)
+                
+                if datetime.now() >= next_ts:
+                    # Create new candle from recent price movement
+                    # For simplicity in simulation, we just use current price
+                    new_row = pd.DataFrame([{
+                        "timestamp": next_ts,
+                        "open": price, 
+                        "high": price * 1.001, 
+                        "low": price * 0.999, 
+                        "close": price, 
+                        "volume": int(np.random.randint(100, 5000))
+                    }]).set_index("timestamp")
+                    
+                    df = pd.concat([df, new_row])
+                    # Keep rolling window size manageable
+                    if len(df) > 100:
+                        df = df.iloc[-100:]
+                    self._historical_data[key] = df
     
     def _sync_prices_to_paper_broker(self):
         """Push current real prices to PaperBroker for order execution."""

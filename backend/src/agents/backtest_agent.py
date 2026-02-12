@@ -160,7 +160,7 @@ class BacktestAgent(BaseAgent):
     TRADING_DAYS_PER_YEAR = 252  # Indian equity market
 
     def __init__(self, config: Dict = None):
-        super().__init__(AgentType.BACKTEST, config or {})
+        super().__init__(name="BacktestAgent", agent_type=AgentType.BACKTEST, config=config or {})
         self._results: Dict[str, BacktestResult] = {}
 
     async def initialize(self) -> None:

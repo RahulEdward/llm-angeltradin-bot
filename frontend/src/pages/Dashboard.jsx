@@ -18,10 +18,17 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
     const [llmEnabled, setLlmEnabled] = useState(false);
     const [llmProvider, setLlmProvider] = useState('--');
     const [llmModel, setLlmModel] = useState('--');
+
+    // Dropdown states
+    const [allSymbols, setAllSymbols] = useState([]);
+    const [selectedExchange, setSelectedExchange] = useState('All');
+    const [selectedScript, setSelectedScript] = useState('All');
+
     const wsRef = useRef(null);
 
     useEffect(() => {
         fetchData();
+        fetchSymbols();
         fetchAgentStatus();
         connectWebSocket();
 
@@ -74,6 +81,79 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
             }
         } catch (err) {
             console.log('LLM metrics fetch failed');
+        }
+    };
+
+    const fetchSymbols = async () => {
+        try {
+            const res = await fetch('/api/broker/symbols');
+            if (res.ok) {
+                const data = await res.json();
+                setAllSymbols(data || []);
+            }
+        } catch (err) {
+            console.error('Failed to fetch symbols', err);
+        }
+    };
+
+    const updateConfig = async (symbols, exchange) => {
+        try {
+            const body = { symbols };
+            if (exchange && exchange !== 'All') body.exchange = exchange;
+            if (exchange === 'All') {
+                // Determine exchanges map if needed, or backend handles it
+            }
+
+            await fetch('/api/config/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            // Refresh status to update current symbol badge
+            setTimeout(fetchAgentStatus, 500);
+        } catch (err) {
+            console.error('Config update failed', err);
+        }
+    };
+
+    const handleExchangeChange = (e) => {
+        const exch = e.target.value;
+        setSelectedExchange(exch);
+        setSelectedScript('All'); // Reset script
+
+        // If switching exchange, update script list in next render
+        // But also update backend configuration if needed?
+        // User said: "agar user all select kare to sab exchange may trade ho"
+        // If All Exchange selected, we trade on ALL symbols?
+        // Let's assume selecting exchange filters the view.
+        // And selecting "All" (Script) sends filtered list to backend.
+
+        let symbolsList = [];
+        if (exch === 'All') {
+            // If Exchange All and Script All -> Send subset of all
+            const nse = allSymbols.filter(s => s.exchange === 'NSE').slice(0, 20);
+            const bse = allSymbols.filter(s => s.exchange === 'BSE').slice(0, 20);
+            symbolsList = [...nse, ...bse].map(s => s.symbol);
+            updateConfig(symbolsList, null);
+        } else {
+            // Specific Exchange, Script All
+            symbolsList = allSymbols.filter(s => s.exchange === exch).slice(0, 50).map(s => s.symbol);
+            updateConfig(symbolsList, exch);
+        }
+    };
+
+    const handleScriptChange = (e) => {
+        const script = e.target.value;
+        setSelectedScript(script);
+
+        if (script === 'All') {
+            // Revert to all in current exchange
+            handleExchangeChange({ target: { value: selectedExchange } });
+        } else {
+            // Specific script
+            const found = allSymbols.find(s => s.symbol === script);
+            const exch = found ? found.exchange : 'NSE';
+            updateConfig([script], exch);
         }
     };
 
@@ -277,6 +357,32 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                             <span className="current-symbol-badge">
                                 📊 <span>{currentSymbol}</span>
                             </span>
+
+                            {/* Exchange & Script Selectors */}
+                            <select
+                                className="dashboard-select"
+                                value={selectedExchange}
+                                onChange={handleExchangeChange}
+                            >
+                                <option value="All">Exch: All</option>
+                                <option value="NSE">NSE</option>
+                                <option value="BSE">BSE</option>
+                            </select>
+
+                            <select
+                                className="dashboard-select"
+                                value={selectedScript}
+                                onChange={handleScriptChange}
+                            >
+                                <option value="All">Script: All</option>
+                                {allSymbols
+                                    .filter(s => selectedExchange === 'All' || s.exchange === selectedExchange)
+                                    .slice(0, 100) // Limit dropdown size for performance
+                                    .map((s, idx) => (
+                                        <option key={idx} value={s.symbol}>{s.symbol}</option>
+                                    ))
+                                }
+                            </select>
                             {llmProvider !== '--' && (
                                 <div className="llm-info-badge">
                                     🤖 <span>{llmProvider}</span> (<span>{llmModel}</span>)
@@ -747,6 +853,30 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                     font-weight: 600;
                     cursor: pointer;
                     transition: all 0.2s ease;
+                }
+                
+                .dashboard-select {
+                    background: rgba(100, 100, 100, 0.2);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    color: #EAECEF;
+                    padding: 6px 10px;
+                    border-radius: 6px;
+                    font-size: 0.75rem;
+                    font-weight: 600;
+                    cursor: pointer;
+                    outline: none;
+                }
+                
+                .dashboard-select option {
+                    background: #1a1a2e;
+                    color: #EAECEF;
+                    padding: 8px 12px;
+                    font-size: 0.8rem;
+                }
+                
+                .dashboard-select:hover, .dashboard-select:focus {
+                    background: rgba(240, 185, 11, 0.1);
+                    border-color: rgba(240, 185, 11, 0.3);
                 }
 
                 .llm-toggle-btn:hover {
