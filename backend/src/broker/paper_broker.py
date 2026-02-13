@@ -31,8 +31,21 @@ class PaperBroker(BaseBroker):
         initial_capital: float = 1000000.0
     ):
         self.data_broker = data_broker
-        self.initial_capital = initial_capital
-        self.available_capital = initial_capital
+        
+        # Load persistent balance from DB
+        try:
+            from ..database import get_paper_account
+            account = get_paper_account(user_id=1)
+            if account:
+                self.initial_capital = account['initial_capital']
+                self.available_capital = account['current_balance']
+                logger.info(f"Paper broker loaded from DB: ₹{self.available_capital:,.2f} (initial: ₹{self.initial_capital:,.2f})")
+            else:
+                self.initial_capital = initial_capital
+                self.available_capital = initial_capital
+        except Exception:
+            self.initial_capital = initial_capital
+            self.available_capital = initial_capital
         
         # Simulated state
         self._orders: Dict[str, Dict] = {}

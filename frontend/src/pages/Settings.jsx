@@ -29,10 +29,74 @@ const Settings = ({ embedded = false, onClose }) => {
     const [savedKeys, setSavedKeys] = useState([]);
     const [keyStatus, setKeyStatus] = useState(''); // 'saved', 'saving', ''
 
+    // Paper Trading State
+    const [paperAccount, setPaperAccount] = useState(null);
+    const [paperCapital, setPaperCapital] = useState('');
+    const [paperLoading, setPaperLoading] = useState(false);
+
     useEffect(() => {
         loadAccounts();
         loadSettings();
+        loadPaperAccount();
     }, []);
+
+    const loadPaperAccount = async () => {
+        try {
+            const res = await fetch('/api/paper/account');
+            if (res.ok) {
+                const data = await res.json();
+                setPaperAccount(data);
+            }
+        } catch (err) {
+            console.log('Paper account load failed');
+        }
+    };
+
+    const setPaperCapitalAmount = async () => {
+        const amount = parseFloat(paperCapital);
+        if (!amount || amount < 1000) {
+            alert('Minimum capital is ₹1,000');
+            return;
+        }
+        setPaperLoading(true);
+        try {
+            const res = await fetch('/api/paper/capital', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ capital: amount })
+            });
+            if (res.ok) {
+                setPaperCapital('');
+                loadPaperAccount();
+                alert('✅ Paper capital updated!');
+            }
+        } catch (err) {
+            alert('Failed to update capital');
+        } finally {
+            setPaperLoading(false);
+        }
+    };
+
+    const resetPaperAccount = async () => {
+        if (!confirm('Reset paper account? This will clear all paper trades and reset balance to initial capital.')) return;
+        try {
+            await fetch('/api/paper/reset', { method: 'POST' });
+            loadPaperAccount();
+            alert('✅ Paper account reset!');
+        } catch (err) {
+            alert('Reset failed');
+        }
+    };
+
+    const clearPaperTrades = async () => {
+        if (!confirm('Clear all paper trade history?')) return;
+        try {
+            await fetch('/api/paper/trades', { method: 'DELETE' });
+            loadPaperAccount();
+        } catch (err) {
+            alert('Clear failed');
+        }
+    };
 
     const loadAccounts = async () => {
         setLoadingAccounts(true);
@@ -243,6 +307,12 @@ const Settings = ({ embedded = false, onClose }) => {
                 >
                     API Keys
                 </button>
+                <button
+                    className={`tab-btn ${activeTab === 'paper' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('paper')}
+                >
+                    Paper Trading
+                </button>
             </div>
 
             {/* Tab Content */}
@@ -436,6 +506,76 @@ const Settings = ({ embedded = false, onClose }) => {
                             </div>
                         </div>
                     </div>
+                )}
+
+                {/* Paper Trading Tab */}
+                {activeTab === 'paper' && (
+                <div className="tab-pane" style={{padding: '0 2px'}}>
+                    {/* Paper Account Overview */}
+                    <div className="section-box">
+                        <h4>📊 Paper Trading Account</h4>
+                        {paperAccount ? (
+                            <div className="paper-stats">
+                                <div className="stat-row"><span className="stat-label">Initial Capital</span><span className="stat-value">₹{paperAccount.initial_capital?.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span></div>
+                                <div className="stat-row"><span className="stat-label">Current Balance</span><span className={`stat-value ${paperAccount.current_balance >= paperAccount.initial_capital ? 'profit' : 'loss'}`}>₹{paperAccount.current_balance?.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span></div>
+                                <div className="stat-row"><span className="stat-label">Total P&L</span><span className={`stat-value ${paperAccount.total_pnl >= 0 ? 'profit' : 'loss'}`}>{paperAccount.total_pnl >= 0 ? '+' : ''}₹{paperAccount.total_pnl?.toLocaleString('en-IN', {minimumFractionDigits: 2})}</span></div>
+                                <div className="stat-row"><span className="stat-label">Total Trades</span><span className="stat-value">{paperAccount.total_trades}</span></div>
+                                <div className="stat-row"><span className="stat-label">Win / Loss</span><span className="stat-value"><span className="profit">{paperAccount.winning_trades}</span> / <span className="loss">{paperAccount.losing_trades}</span></span></div>
+                                <div className="stat-row"><span className="stat-label">Win Rate</span><span className="stat-value">{paperAccount.win_rate}%</span></div>
+                            </div>
+                        ) : (
+                            <div className="loading-text">Loading...</div>
+                        )}
+                    </div>
+
+                    {/* Set Capital */}
+                    <div className="section-box">
+                        <h4>💰 Set Initial Capital</h4>
+                        <p style={{color: '#848E9C', fontSize: '0.8rem', margin: '0 0 12px'}}>Change starting amount. This resets your paper account.</p>
+                        <div className="form-group" style={{marginBottom: 8}}>
+                            <input type="number" className="form-input" placeholder="Enter amount (e.g. 500000)" value={paperCapital} onChange={(e) => setPaperCapital(e.target.value)} min="1000" />
+                        </div>
+                        <div style={{display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12}}>
+                            {[100000, 500000, 1000000, 5000000].map(amt => (
+                                <button key={amt} style={{padding: '6px 14px', background: 'rgba(0,240,255,0.1)', border: '1px solid rgba(0,240,255,0.3)', borderRadius: 6, color: '#00F0FF', cursor: 'pointer', fontSize: '0.8rem'}} onClick={() => setPaperCapital(amt.toString())}>
+                                    ₹{(amt/100000).toFixed(0)}L
+                                </button>
+                            ))}
+                        </div>
+                        <button className="save-account-btn" onClick={setPaperCapitalAmount} disabled={paperLoading}>
+                            {paperLoading ? '⏳ Updating...' : '💾 Set Capital & Reset'}
+                        </button>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="section-box">
+                        <h4>⚙️ Account Actions</h4>
+                        <div style={{display: 'flex', gap: 10}}>
+                            <button style={{flex:1, padding: '10px', background: 'rgba(240,185,11,0.1)', border: '1px solid rgba(240,185,11,0.3)', borderRadius: 8, color: '#F0B90B', cursor: 'pointer', fontWeight: 600}} onClick={resetPaperAccount}>🔄 Reset Account</button>
+                            <button style={{flex:1, padding: '10px', background: 'rgba(246,70,93,0.1)', border: '1px solid rgba(246,70,93,0.3)', borderRadius: 8, color: '#F6465D', cursor: 'pointer', fontWeight: 600}} onClick={clearPaperTrades}>🗑️ Clear Trades</button>
+                            <button style={{flex:1, padding: '10px', background: 'rgba(0,240,255,0.1)', border: '1px solid rgba(0,240,255,0.3)', borderRadius: 8, color: '#00F0FF', cursor: 'pointer', fontWeight: 600}} onClick={loadPaperAccount}>🔄 Refresh</button>
+                        </div>
+                    </div>
+
+                    {/* Recent Trades */}
+                    {paperAccount?.recent_trades?.length > 0 && (
+                        <div className="section-box">
+                            <h4>📋 Recent Paper Trades ({paperAccount.recent_trades.length})</h4>
+                            <div style={{maxHeight: 300, overflowY: 'auto'}}>
+                                {paperAccount.recent_trades.slice(0, 30).map((t, i) => (
+                                    <div key={i} style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '0.8rem'}}>
+                                        <span style={{color: t.side === 'BUY' ? '#00ff9d' : '#F6465D', fontWeight: 700, width: 40}}>{t.side}</span>
+                                        <span style={{color: '#EAECEF', width: 80}}>{t.symbol}</span>
+                                        <span style={{color: '#848E9C'}}>x{t.quantity}</span>
+                                        <span style={{color: '#EAECEF'}}>₹{t.entry_price?.toFixed(2)}</span>
+                                        <span style={{color: t.pnl >= 0 ? '#00ff9d' : '#F6465D'}}>{t.pnl ? `₹${t.pnl.toFixed(2)}` : '-'}</span>
+                                        <span style={{color: t.status === 'open' ? '#F0B90B' : '#848E9C', fontSize: '0.7rem'}}>{t.status}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
                 )}
             </div>
 
@@ -912,6 +1052,52 @@ const Settings = ({ embedded = false, onClose }) => {
 
                 .connect-totp-btn:hover:not(:disabled) {
                     box-shadow: 0 4px 20px rgba(0, 240, 255, 0.5);
+                }
+
+                /* Paper Trading Stats */
+                .paper-stats {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 8px;
+                }
+
+                .stat-row {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    padding: 8px 0;
+                    border-bottom: 1px solid rgba(255,255,255,0.05);
+                }
+
+                .stat-row:last-child {
+                    border-bottom: none;
+                }
+
+                .stat-label {
+                    color: #848E9C;
+                    font-size: 0.85rem;
+                }
+
+                .stat-value {
+                    color: #EAECEF;
+                    font-weight: 600;
+                    font-size: 0.9rem;
+                }
+
+                .stat-value.profit {
+                    color: #00ff9d;
+                }
+
+                .stat-value.loss {
+                    color: #F6465D;
+                }
+
+                .profit {
+                    color: #00ff9d;
+                }
+
+                .loss {
+                    color: #F6465D;
                 }
             `}</style>
         </div>

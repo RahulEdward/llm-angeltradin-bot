@@ -6,6 +6,7 @@ No simulated/mock data — requires broker connection for live prices.
 
 import asyncio
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 import pandas as pd
 from loguru import logger
@@ -46,6 +47,7 @@ class MarketDataAgent(BaseAgent):
         
         # Broker reference
         self._broker: Optional[BaseBroker] = None
+        self._last_fetch_time: Optional[str] = None
     
     async def initialize(self) -> bool:
         """Initialize market data agent."""
@@ -78,41 +80,70 @@ class MarketDataAgent(BaseAgent):
         Try to get a REAL broker connection that can provide market data.
         Returns True only if a real connected broker is available.
         """
+        # First check: is there a connected Angel One broker?
         connected_broker = BrokerFactory.get_connected_broker()
         if connected_broker:
-            self._broker = BrokerFactory.get_instance()
-            if not self._broker:
-                self._broker = BrokerFactory.create()
-        
-        if not self._broker:
-            self._broker = BrokerFactory.get_instance()
-        
-        if self._broker:
             try:
-                return await self._broker.is_connected()
+                if await connected_broker.is_connected():
+                    # Use the connected broker directly for data
+                    self._broker = connected_broker
+                    return True
+            except Exception as e:
+                logger.warning(f"Connected broker check failed: {e}")
+        
+        # Second check: try the factory instance (PaperBroker with data_broker)
+        instance = BrokerFactory.get_instance()
+        if instance:
+            self._broker = instance
+            try:
+                # For PaperBroker, check if data_broker is connected
+                if hasattr(instance, 'data_broker') and instance.data_broker:
+                    if await instance.data_broker.is_connected():
+                        instance._connected = True
+                        return True
+                # For AngelOneBroker direct
+                if await instance.is_connected():
+                    return True
             except Exception:
-                return False
+                pass
+        
         return False
     
     async def process_cycle(self) -> List[AgentMessage]:
-        """Fetch and process real market data. No data if broker not connected."""
+        """Fetch and process REAL market data only. No data if broker not connected."""
         messages = []
         
         broker_available = await self._try_get_broker()
         
         try:
-            if broker_available:
-                await self._fetch_real_data()
-                data_source = "broker"
-                # Fallback: if real data returned 0 quotes, use simulated data
-                if not self._market_data:
-                    logger.warning("Broker connected but 0 quotes fetched — falling back to simulated data")
-                    await self._generate_simulated_data()
-                    data_source = "simulated"
-            else:
-                # No broker — generate simulated data for Paper mode
-                await self._generate_simulated_data()
-                data_source = "simulated"
+            if not broker_available:
+                # NO BROKER = NO DATA. Period.
+                logger.warning("No broker connected - cannot fetch market data")
+                messages.append(AgentMessage(
+                    type=MessageType.ERROR,
+                    source_agent=self.name,
+                    payload={
+                        "error": "Broker not connected. Connect Angel One broker for market data.",
+                        "agent": "MarketDataAgent",
+                        "requires_broker": True
+                    }
+                ))
+                return messages
+            
+            # Fetch REAL data from broker
+            await self._fetch_real_data()
+            
+            if not self._market_data:
+                logger.warning("Broker connected but no quotes received")
+                messages.append(AgentMessage(
+                    type=MessageType.ERROR,
+                    source_agent=self.name,
+                    payload={
+                        "error": "No market data received from broker. Check symbol tokens.",
+                        "agent": "MarketDataAgent"
+                    }
+                ))
+                return messages
             
             # Calculate indicators for all symbols
             for symbol in self.symbols:
@@ -125,7 +156,7 @@ class MarketDataAgent(BaseAgent):
                 "quotes": self._market_data,
                 "indicators": self._indicators,
                 "timestamp": datetime.now().isoformat(),
-                "source": data_source
+                "source": "angel_one"
             }
             
             messages.append(AgentMessage(
@@ -138,7 +169,7 @@ class MarketDataAgent(BaseAgent):
             self.update_metrics(
                 symbols_tracked=len(self.symbols),
                 last_fetch=datetime.now().isoformat(),
-                data_source=data_source
+                data_source="angel_one"
             )
             
         except Exception as e:
@@ -153,10 +184,16 @@ class MarketDataAgent(BaseAgent):
         return messages
     
     async def _fetch_real_data(self):
-        """Fetch real market data from broker."""
+        """Fetch real market data from Angel One broker.
+        LTP quotes are the priority. Historical data is loaded from local CSV files
+        (fast, reliable) with broker API as optional fallback.
+        """
+        logger.info(f"Fetching real data for {len(self.symbols)} symbols via {type(self._broker).__name__}")
+
+        # Step 1: Fetch LTP quotes (fast, critical)
         for symbol in self.symbols:
             exchange = self.exchanges.get(symbol, "NSE")
-            
+
             try:
                 quote = await self._broker.get_quote(symbol, exchange)
                 if quote:
@@ -172,130 +209,33 @@ class MarketDataAgent(BaseAgent):
                         "bid": quote.bid,
                         "ask": quote.ask,
                         "timestamp": quote.timestamp.isoformat(),
-                        "simulated": False
+                        "source": "angel_one"
                     }
+                    logger.info(f"✅ {symbol}: LTP=₹{quote.ltp:.2f}")
+                else:
+                    logger.warning(f"❌ {symbol}: get_quote returned None")
             except Exception as e:
-                logger.warning(f"Real quote fetch failed for {symbol}: {e}")
-            
-            # Fetch historical data
-            for timeframe in self.timeframes:
-                await self._fetch_historical(symbol, exchange, timeframe)
-        
-        # Sync prices to paper broker for order execution
+                logger.warning(f"❌ {symbol}: Quote fetch error - {e}")
+
+        logger.info(f"Fetched {len(self._market_data)} quotes out of {len(self.symbols)} symbols")
+
+        if self._market_data:
+            self._last_fetch_time = datetime.now().isoformat()
+
+        # Step 2: Load historical data from local CSV files (non-blocking for trading)
+        # This runs AFTER quotes are secured, so even if it fails, trading continues
+        try:
+            for symbol in self.symbols:
+                exchange = self.exchanges.get(symbol, "NSE")
+                for timeframe in self.timeframes:
+                    await self._fetch_historical(symbol, exchange, timeframe)
+        except Exception as e:
+            logger.warning(f"Historical data loading failed (non-fatal): {e}")
+
+        # Sync prices to paper broker for order execution (paper mode uses real prices)
         self._sync_prices_to_paper_broker()
 
-    async def _generate_simulated_data(self):
-        """Generate simulated market data (Random Walk) when no broker connected."""
-        import random
-        
-        for symbol in self.symbols:
-            exchange = self.exchanges.get(symbol, "NSE")
-            key = f"{exchange}:{symbol}"
-            
-            # Get previous price or default start price
-            prev_data = self._market_data.get(key, {})
-            current_price = prev_data.get("ltp", 0)
-            
-            if current_price == 0:
-                # Initial random price between 500 and 3000
-                current_price = random.uniform(500, 3000)
-            
-            # Random walk: -0.2% to +0.2% change per cycle
-            change_pct = random.uniform(-0.002, 0.002)
-            new_price = current_price * (1 + change_pct)
-            new_price = round(new_price, 2)
-            
-            # Generate tick data
-            spread = new_price * 0.0005  # 0.05% spread
-            bid = round(new_price - spread, 2)
-            ask = round(new_price + spread, 2)
-            
-            # Update day high/low
-            day_open = prev_data.get("open", new_price)
-            day_high = max(prev_data.get("high", new_price), new_price)
-            day_low = min(prev_data.get("low", new_price), new_price)
-            
-            self._market_data[key] = {
-                "symbol": symbol,
-                "exchange": exchange,
-                "ltp": new_price,
-                "open": day_open,
-                "high": day_high,
-                "low": day_low,
-                "close": day_open,  # treating open as prev close for simplicity
-                "volume": prev_data.get("volume", 0) + random.randint(10, 500),
-                "bid": bid,
-                "ask": ask,
-                "timestamp": datetime.now().isoformat(),
-                "simulated": True
-            }
-            
-            # Generate fake historical data for indicators if needed
-            # (In a real scenario, we'd append this tick to OHLCV history)
-            self._update_simulated_history(symbol, exchange, new_price)
-        
-        # Sync to paper broker so orders execute at these prices
-        self._sync_prices_to_paper_broker()
 
-    def _update_simulated_history(self, symbol: str, exchange: str, price: float):
-        """Append simulated tick to historical data for indicator calculation."""
-        import numpy as np
-        
-        for timeframe in self.timeframes:
-            key = f"{exchange}:{symbol}:{timeframe}"
-            df = self._historical_data.get(key)
-            
-            # Create synthetic history if missing (backfill 50 candles)
-            if df is None or df.empty:
-                rows = []
-                # Timesteps for backfill
-                minutes = {"5m": 5, "15m": 15, "1h": 60}.get(timeframe, 5)
-                end_time = datetime.now()
-                
-                # Random walk backfill
-                curr = price
-                for i in range(50):
-                    ts = end_time - timedelta(minutes=minutes * (50 - i))
-                    change = np.random.normal(0, 0.002) # 0.2% volatility
-                    o = curr
-                    c = curr * (1 + change)
-                    h = max(o, c) * (1 + abs(np.random.normal(0, 0.001)))
-                    l = min(o, c) * (1 - abs(np.random.normal(0, 0.001)))
-                    v = int(np.random.randint(100, 10000))
-                    rows.append({
-                        "timestamp": ts,
-                        "open": o, "high": h, "low": l, "close": c, "volume": v
-                    })
-                    curr = c
-                
-                df = pd.DataFrame(rows)
-                df.set_index("timestamp", inplace=True)
-                self._historical_data[key] = df
-            
-            # Append new candle if enough time passed
-            else:
-                last_ts = df.index[-1]
-                minutes = {"5m": 5, "15m": 15, "1h": 60}.get(timeframe, 5)
-                next_ts = last_ts + timedelta(minutes=minutes)
-                
-                if datetime.now() >= next_ts:
-                    # Create new candle from recent price movement
-                    # For simplicity in simulation, we just use current price
-                    new_row = pd.DataFrame([{
-                        "timestamp": next_ts,
-                        "open": price, 
-                        "high": price * 1.001, 
-                        "low": price * 0.999, 
-                        "close": price, 
-                        "volume": int(np.random.randint(100, 5000))
-                    }]).set_index("timestamp")
-                    
-                    df = pd.concat([df, new_row])
-                    # Keep rolling window size manageable
-                    if len(df) > 100:
-                        df = df.iloc[-100:]
-                    self._historical_data[key] = df
-    
     def _sync_prices_to_paper_broker(self):
         """Push current real prices to PaperBroker for order execution."""
         try:
@@ -340,7 +280,25 @@ class MarketDataAgent(BaseAgent):
         logger.info("MarketDataAgent shutdown complete")
     
     async def _fetch_historical(self, symbol: str, exchange: str, timeframe: str) -> None:
-        """Fetch historical data for a symbol from broker."""
+        """Load historical data from local CSV files first (fast, reliable).
+        Falls back to broker API with timeout if CSV not available.
+        """
+        key = f"{exchange}:{symbol}:{timeframe}"
+        
+        # ─── Step 1: Try local CSV files (instant, no API calls) ───
+        try:
+            csv_path = Path(__file__).parent.parent.parent / "data" / "historical" / symbol / f"{symbol}_{timeframe}.csv"
+            if csv_path.exists():
+                df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+                df.set_index("timestamp", inplace=True)
+                df.sort_index(inplace=True)
+                if len(df) > 0:
+                    self._historical_data[key] = df
+                    return  # CSV loaded successfully, no need for API
+        except Exception as e:
+            logger.debug(f"CSV load failed for {symbol}_{timeframe}: {e}")
+        
+        # ─── Step 2: Broker API fallback with 3s timeout ───
         try:
             lookback_map = {
                 "1m": timedelta(days=1),
@@ -350,12 +308,12 @@ class MarketDataAgent(BaseAgent):
                 "1d": timedelta(days=365)
             }
             lookback = lookback_map.get(timeframe, timedelta(days=5))
-            
             to_date = datetime.now()
             from_date = to_date - lookback
             
-            candles = await self._broker.get_historical_data(
-                symbol, exchange, timeframe, from_date, to_date
+            candles = await asyncio.wait_for(
+                self._broker.get_historical_data(symbol, exchange, timeframe, from_date, to_date),
+                timeout=3.0
             )
             
             if candles:
@@ -371,12 +329,12 @@ class MarketDataAgent(BaseAgent):
                     for c in candles
                 ])
                 df.set_index("timestamp", inplace=True)
-                
-                key = f"{exchange}:{symbol}:{timeframe}"
                 self._historical_data[key] = df
                 
+        except asyncio.TimeoutError:
+            logger.debug(f"Historical API timeout for {symbol}_{timeframe} (skipped)")
         except Exception as e:
-            self.log_error(f"Historical fetch error {symbol}: {str(e)}")
+            logger.debug(f"Historical API error {symbol}_{timeframe}: {e}")
     
     async def _calculate_indicators(self, symbol: str, exchange: str) -> Dict[str, Any]:
         """Calculate technical indicators."""

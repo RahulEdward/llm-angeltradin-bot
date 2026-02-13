@@ -66,6 +66,20 @@ class AngelOneBroker(BaseBroker):
         OrderType.STOP_LOSS_MARKET: "STOPLOSS_MARKET"
     }
     
+    # Hardcoded NSE token map for common symbols (reliable fallback)
+    NSE_TOKEN_MAP = {
+        "RELIANCE": ("2885", "RELIANCE-EQ"),
+        "TCS": ("11536", "TCS-EQ"),
+        "INFY": ("1594", "INFY-EQ"),
+        "HDFCBANK": ("1333", "HDFCBANK-EQ"),
+        "ICICIBANK": ("4963", "ICICIBANK-EQ"),
+        "SBIN": ("3045", "SBIN-EQ"),
+        "WIPRO": ("3787", "WIPRO-EQ"),
+        "BAJFINANCE": ("317", "BAJFINANCE-EQ"),
+        "LT": ("11483", "LT-EQ"),
+        "TATASTEEL": ("3499", "TATASTEEL-EQ"),
+    }
+    
     def __init__(
         self,
         api_key: str,
@@ -621,6 +635,14 @@ class AngelOneBroker(BaseBroker):
         if cache_key in self._symbol_cache:
             return self._symbol_cache[cache_key]
         
+        # ─── Method 0: Hardcoded NSE tokens (instant, always correct) ───
+        if exchange == "NSE" and symbol in self.NSE_TOKEN_MAP:
+            token, trading_sym = self.NSE_TOKEN_MAP[symbol]
+            self._symbol_cache[cache_key] = token
+            self._symbol_name_cache[cache_key] = trading_sym
+            logger.info(f"Symbol resolved from hardcoded map: {cache_key} -> token={token}")
+            return token
+        
         # ─── Method 1: Local symbols.json lookup (fast & reliable) ───
         try:
             symbols_file = Path(__file__).parent.parent.parent / "data" / "symbols.json"
@@ -671,7 +693,7 @@ class AngelOneBroker(BaseBroker):
                         logger.info(f"Symbol resolved from API: {cache_key} -> {token} (matched {result_sym})")
                         return token
         
-        logger.warning(f"Symbol token not found: {cache_key} (tried local DB + API)")
+        logger.warning(f"Symbol token not found: {cache_key} (tried hardcoded + local DB + API)")
         return ""
     
     async def search_symbols(self, query: str, exchange: str = "NSE") -> List[Dict[str, Any]]:

@@ -25,6 +25,9 @@ const App = () => {
     const [interval, setIntervalValue] = useState('1');
     const [showSettings, setShowSettings] = useState(false);
     const [ws, setWs] = useState(null);
+    const [brokerConnected, setBrokerConnected] = useState(false);
+    const [liveDataCount, setLiveDataCount] = useState(0);
+    const [lastDataTime, setLastDataTime] = useState(null);
 
     // Check if user is already logged in
     useEffect(() => {
@@ -44,6 +47,9 @@ const App = () => {
 
         fetchStatus();
 
+        // Poll status every 5 seconds for live indicator updates
+        const statusInterval = setInterval(fetchStatus, 5000);
+
         // Connect WebSocket
         try {
             const websocket = new WebSocket(`ws://${window.location.hostname}:8000/ws`);
@@ -53,6 +59,9 @@ const App = () => {
                     setSystemStatus(data.data);
                     setIsRunning(data.data.is_running);
                     setCycleCount(data.data.cycle_count || 0);
+                    setBrokerConnected(data.data.broker_connected || false);
+                    setLiveDataCount(data.data.live_data_count || 0);
+                    setLastDataTime(data.data.last_data_time || null);
                     // Don't override mode from WS - let user control it
                 }
             };
@@ -61,9 +70,13 @@ const App = () => {
             };
             setWs(websocket);
 
-            return () => websocket.close();
+            return () => {
+                clearInterval(statusInterval);
+                websocket.close();
+            };
         } catch (err) {
             console.log('WebSocket not available');
+            return () => clearInterval(statusInterval);
         }
     }, [isAuthenticated]);
 
@@ -76,6 +89,9 @@ const App = () => {
             setSystemStatus(data);
             setIsRunning(data.is_running);
             setCycleCount(data.cycle_count || 0);
+            setBrokerConnected(data.broker_connected || false);
+            setLiveDataCount(data.live_data_count || 0);
+            setLastDataTime(data.last_data_time || null);
             // Only set mode on first load
             if (!modeLoaded && data.mode) {
                 setMode(data.mode);
@@ -119,22 +135,25 @@ const App = () => {
     const handleControl = async (action) => {
         try {
             if (action === 'start') {
-                await fetch('/api/trading/start', { method: 'POST' });
-                setIsRunning(true);
-                setIsPaused(false);
+                const res = await fetch('/api/trading/start', { method: 'POST' });
+                if (res.ok) {
+                    setIsRunning(true);
+                    setIsPaused(false);
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    console.error('Start failed:', data.detail || 'Unknown error');
+                }
             } else if (action === 'pause') {
                 setIsPaused(!isPaused);
             } else if (action === 'stop') {
-                await fetch('/api/trading/stop', { method: 'POST' });
-                setIsRunning(false);
-                setIsPaused(false);
+                const res = await fetch('/api/trading/stop', { method: 'POST' });
+                if (res.ok) {
+                    setIsRunning(false);
+                    setIsPaused(false);
+                }
             }
         } catch (err) {
             console.error('Control action failed:', err);
-            // Toggle for demo purposes
-            if (action === 'start') { setIsRunning(true); setIsPaused(false); }
-            if (action === 'stop') { setIsRunning(false); setIsPaused(false); }
-            if (action === 'pause') { setIsPaused(!isPaused); }
         }
     };
 
@@ -289,6 +308,27 @@ const App = () => {
                         </div>
                     </div>
                 </header>
+
+                {/* Status Indicator Bar */}
+                <div className="status-bar">
+                    <div className={`status-chip ${brokerConnected ? 'ok' : 'err'}`}>
+                        <span className="dot" />
+                        <span>{brokerConnected ? 'Broker Connected' : 'Broker Disconnected'}</span>
+                    </div>
+                    <div className={`status-chip ${liveDataCount > 0 ? 'ok' : brokerConnected ? 'warn' : 'err'}`}>
+                        <span className="dot" />
+                        <span>{liveDataCount > 0 ? `Live Data: ${liveDataCount} symbols` : brokerConnected ? 'Data Ready (Click ▶ Start)' : 'No Live Data'}</span>
+                    </div>
+                    <div className={`status-chip ${brokerConnected ? (liveDataCount > 0 ? 'ok' : 'warn') : 'err'}`}>
+                        <span className="dot" />
+                        <span>{brokerConnected ? (isRunning ? `${mode === 'live' ? 'Live' : 'Paper'} Trading Active` : `Ready: ${mode === 'live' ? 'Live' : 'Paper'} Trading`) : 'Not Ready'}</span>
+                    </div>
+                    {lastDataTime && (
+                        <div className="status-chip info">
+                            <span>Last: {new Date(lastDataTime).toLocaleTimeString('en-IN')}</span>
+                        </div>
+                    )}
+                </div>
 
                 {/* Main Content - Page Routing */}
                 {currentPage === 'dashboard' ? (
@@ -547,6 +587,89 @@ const App = () => {
                     background: rgba(240, 185, 11, 0.2);
                     color: #F0B90B;
                     border: 1px solid rgba(240, 185, 11, 0.3);
+                }
+
+                /* Status Indicator Bar */
+                .status-bar {
+                    display: flex;
+                    align-items: center;
+                    gap: 12px;
+                    padding: 6px 24px;
+                    background: rgba(2, 3, 4, 0.7);
+                    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+                    margin-bottom: 16px;
+                    border-radius: 8px;
+                    flex-wrap: wrap;
+                }
+
+                .status-chip {
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    padding: 4px 12px;
+                    border-radius: 20px;
+                    font-size: 0.72rem;
+                    font-weight: 600;
+                    letter-spacing: 0.3px;
+                }
+
+                .status-chip .dot {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 50%;
+                    flex-shrink: 0;
+                }
+
+                .status-chip.ok {
+                    background: rgba(14, 203, 129, 0.12);
+                    color: #0ECB81;
+                    border: 1px solid rgba(14, 203, 129, 0.25);
+                }
+
+                .status-chip.ok .dot {
+                    background: #0ECB81;
+                    box-shadow: 0 0 6px #0ECB81;
+                    animation: pulse-green 2s infinite;
+                }
+
+                .status-chip.err {
+                    background: rgba(246, 70, 93, 0.12);
+                    color: #F6465D;
+                    border: 1px solid rgba(246, 70, 93, 0.25);
+                }
+
+                .status-chip.err .dot {
+                    background: #F6465D;
+                    box-shadow: 0 0 6px #F6465D;
+                }
+
+                .status-chip.warn {
+                    background: rgba(240, 185, 11, 0.12);
+                    color: #F0B90B;
+                    border: 1px solid rgba(240, 185, 11, 0.25);
+                }
+
+                .status-chip.warn .dot {
+                    background: #F0B90B;
+                    box-shadow: 0 0 6px #F0B90B;
+                    animation: pulse-yellow 2s infinite;
+                }
+
+                .status-chip.info {
+                    background: rgba(0, 240, 255, 0.08);
+                    color: #848E9C;
+                    border: 1px solid rgba(0, 240, 255, 0.15);
+                    font-weight: 400;
+                }
+
+                @keyframes pulse-green {
+                    0%, 100% { opacity: 1; }
+                    50% { opacity: 0.4; }
+                }
+
+                @keyframes pulse-yellow {
+                    0%, 100% { opacity: 1; }
+                    50% { opacity: 0.4; }
                 }
 
                 /* Dashboard Grid */

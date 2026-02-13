@@ -112,6 +112,9 @@ async def lifespan(app: FastAPI):
     await supervisor.initialize()
     logger.info("Platform ready - paper mode uses simulated data, connect broker for real data")
     
+    # Auto-restore broker connection from saved tokens
+    await auto_restore_broker_connection()
+    
     yield
     
     # Shutdown
@@ -192,7 +195,9 @@ class LoginRequest(BaseModel):
 from src.database import (
     authenticate_user, get_all_users, create_user, save_trade, 
     get_user_trades, save_agent_log, get_agent_logs,
-    save_api_key, get_api_keys, get_api_key_decrypted, delete_api_key, get_all_active_api_keys
+    save_api_key, get_api_keys, get_api_key_decrypted, delete_api_key, get_all_active_api_keys,
+    get_paper_account, update_paper_account, save_paper_trade, get_paper_trades,
+    get_db_connection
 )
 
 
@@ -282,16 +287,32 @@ async def health():
 @app.get("/api/status")
 async def get_status():
     """Get system status."""
+    broker_connected = len(connected_brokers) > 0
+    
+    # Check live data status from market data agent
+    live_data_count = 0
+    last_data_time = None
+    if supervisor and supervisor._agents.get("market_data"):
+        mda = supervisor._agents["market_data"]
+        if hasattr(mda, '_market_data'):
+            live_data_count = len(mda._market_data)
+        if hasattr(mda, '_last_fetch_time'):
+            last_data_time = mda._last_fetch_time
+    
     if not supervisor:
         return {
             "is_running": False,
             "cycle_count": 0,
             "mode": settings.trading_mode.value,
-            "broker_connected": len(connected_brokers) > 0
+            "broker_connected": broker_connected,
+            "live_data_count": live_data_count,
+            "last_data_time": last_data_time,
         }
     status = supervisor.get_system_status()
     status["mode"] = settings.trading_mode.value
-    status["broker_connected"] = len(connected_brokers) > 0
+    status["broker_connected"] = broker_connected
+    status["live_data_count"] = live_data_count
+    status["last_data_time"] = last_data_time
     return status
 
 
@@ -450,9 +471,24 @@ async def get_broker_symbols():
 
 @app.post("/api/trading/start")
 async def start_trading():
-    """Start the multi-agent trading loop (reference-repo style)."""
+    """Start the multi-agent trading loop. REQUIRES broker connection."""
     if not supervisor:
         raise HTTPException(status_code=503, detail="System not initialized")
+    
+    # ─── Prevent duplicate loops ───
+    if supervisor._is_running:
+        return {"status": "already_running", "mode": settings.trading_mode.value}
+    
+    # ─── STRICT CHECK: Broker MUST be connected ───
+    if len(connected_brokers) == 0:
+        await agent_ws_manager.send_agent_message(
+            "System", 
+            "❌ Cannot start trading: No broker connected. Go to Settings → Connect Angel One broker first."
+        )
+        raise HTTPException(
+            status_code=400, 
+            detail="Broker not connected. Connect Angel One broker in Settings before starting trading."
+        )
     
     # ─── Ensure correct broker for current mode ───
     current_broker = BrokerFactory.get_instance()
@@ -466,16 +502,25 @@ async def start_trading():
         logger.info("Mode is PAPER but broker is not PaperBroker — recreating...")
         BrokerFactory.create(mode)
     
-    # Refresh broker reference in MarketDataAgent
+    # Refresh broker reference in agents and ensure PaperBroker is connected
     fresh_broker = BrokerFactory.get_instance()
+    if fresh_broker and hasattr(fresh_broker, '_connected'):
+        fresh_broker._connected = True  # Mark as connected since we verified broker above
+    
+    # Also ensure the connected Angel One broker is set as data source
+    connected_angel = BrokerFactory.get_connected_broker()
+    if connected_angel and fresh_broker and hasattr(fresh_broker, 'data_broker'):
+        fresh_broker.data_broker = connected_angel
+        fresh_broker._standalone = False
+    
     if supervisor._agents.get("market_data"):
-        supervisor._agents["market_data"]._broker = fresh_broker
+        supervisor._agents["market_data"]._broker = connected_angel or fresh_broker
     if supervisor._agents.get("execution"):
         supervisor._agents["execution"]._broker = fresh_broker
     logger.info(f"Trading start: mode={mode.value}, broker={type(fresh_broker).__name__ if fresh_broker else 'None'}")
     
-    # ─── Boot Messages (like reference-repo) ───
-    await agent_ws_manager.send_agent_message("System", "**System initialized.** All agents are online and ready for parallel execution.")
+    # ─── Boot Messages ───
+    await agent_ws_manager.send_agent_message("System", "**System initialized.** All agents are online and ready.")
     await agent_ws_manager.send_agent_message("Supervisor", f"🚀 Trading loop started | Mode: {settings.trading_mode.value}")
     await agent_ws_manager.send_agent_message("Supervisor", f"Symbols: RELIANCE, TCS, INFY, HDFCBANK, ICICIBANK | Cycle: {supervisor._cycle_interval}s")
     
@@ -494,12 +539,8 @@ async def start_trading():
         pass
     await agent_ws_manager.send_agent_message("Supervisor", f"LLM: {llm_status} ({llm_info})")
     
-    # Data source
-    broker_connected = len(connected_brokers) > 0
-    if broker_connected:
-        await agent_ws_manager.send_agent_message("Market Data Agent", "📊 Broker connected - using live market data")
-    else:
-        await agent_ws_manager.send_agent_message("Market Data Agent", "📊 No broker - using simulated market data (connect via Settings for real data)")
+    # Data source - always Angel One now
+    await agent_ws_manager.send_agent_message("Market Data Agent", "📊 Using Angel One live market data")
     
     # ─── Trading Loop ───
     async def trading_loop():
@@ -514,7 +555,7 @@ async def start_trading():
                 # Run the full multi-agent pipeline
                 messages = await supervisor.process_cycle()
                 
-                # ─── Broadcast each message to chatroom (reference-repo style) ───
+                # ─── Broadcast each message to chatroom ───
                 for msg in messages:
                     agent_name = msg.source_agent
                     payload = msg.payload
@@ -576,6 +617,7 @@ async def start_trading():
                                 "Execution Agent",
                                 f"⚡ Executed: {action} {symbol} x{qty} @ ₹{price:,.2f}"
                             )
+                            # Save to trades table
                             try:
                                 save_trade(user_id=1, trade_data={
                                     "symbol": symbol,
@@ -588,13 +630,43 @@ async def start_trading():
                                 })
                             except Exception as e:
                                 logger.error(f"Failed to save trade: {e}")
+                            
+                            # Save to paper_trades if paper mode
+                            if settings.trading_mode == TradingMode.PAPER:
+                                try:
+                                    save_paper_trade(user_id=1, trade={
+                                        "trade_id": payload.get("trade_id", ""),
+                                        "symbol": symbol,
+                                        "exchange": "NSE",
+                                        "side": action,
+                                        "quantity": qty,
+                                        "entry_price": price,
+                                        "status": "open",
+                                        "order_type": "MARKET",
+                                        "stop_loss": payload.get("stop_loss"),
+                                        "take_profit": payload.get("take_profit"),
+                                        "entry_time": datetime.now().isoformat(),
+                                        "cycle_number": supervisor._current_cycle if supervisor else 0
+                                    })
+                                    # Deduct trade cost from paper account balance
+                                    trade_cost = price * qty
+                                    account = get_paper_account(1)
+                                    if account:
+                                        new_balance = account['current_balance'] - trade_cost
+                                        update_paper_account(user_id=1, current_balance=new_balance)
+                                        logger.info(f"Paper balance: ₹{account['current_balance']:,.2f} → ₹{new_balance:,.2f} (trade: {action} {symbol} x{qty} @ ₹{price:,.2f})")
+                                except Exception as e:
+                                    logger.error(f"Failed to save paper trade: {e}")
+                            
                             await agent_ws_manager.send_trade({
                                 "time": datetime.now().strftime("%H:%M:%S"),
                                 "symbol": symbol,
                                 "side": action,
+                                "quantity": qty,
                                 "entry": price,
                                 "exit": None,
-                                "pnl": 0
+                                "pnl": 0,
+                                "status": "open"
                             })
                         else:
                             error = payload.get("error", "Unknown error")
@@ -945,9 +1017,19 @@ async def place_order(order: OrderRequest):
 
 @app.post("/api/backtest")
 async def run_backtest(request: BacktestRequest):
-    """Run a backtest with real historical data."""
+    """Run a backtest with historical data (CSV files or Angel One API)."""
     if not supervisor:
         raise HTTPException(status_code=503, detail="System not initialized")
+    
+    # Check if we have data sources: CSV files or broker
+    has_csv = Path(__file__).parent.joinpath("data", "historical").exists()
+    has_broker = len(connected_brokers) > 0
+    
+    if not has_csv and not has_broker:
+        raise HTTPException(
+            status_code=400, 
+            detail="No data available. Either download historical data (run download_historical.py) or connect Angel One broker."
+        )
     
     try:
         # Resolve symbols: frontend sends 'symbols' array
@@ -1139,6 +1221,112 @@ async def save_trade_record(trade_data: dict):
     return {"success": True, "trade_id": trade_id}
 
 
+@app.get("/api/symbol_stats")
+async def get_symbol_stats():
+    """Get per-symbol performance statistics from trades."""
+    from collections import defaultdict
+    
+    all_trades = []
+    
+    # Paper mode: get from paper_trades DB
+    if settings.trading_mode == TradingMode.PAPER:
+        try:
+            all_trades = get_paper_trades(user_id=1, limit=500)
+        except Exception as e:
+            logger.error(f"Symbol stats paper trades error: {e}")
+    else:
+        # Live mode: get from trade history DB
+        try:
+            all_trades = get_user_trades(limit=500)
+        except Exception as e:
+            logger.error(f"Symbol stats live trades error: {e}")
+    
+    # Also include in-memory trades from broker
+    try:
+        broker = BrokerFactory.get_instance()
+        if broker and hasattr(broker, '_trade_history') and broker._trade_history:
+            db_ids = {t.get('trade_id') or t.get('order_id') for t in all_trades}
+            for t in broker._trade_history:
+                if t.get('order_id') not in db_ids:
+                    all_trades.append({
+                        "symbol": t.get("symbol", ""),
+                        "side": t.get("side", ""),
+                        "quantity": t.get("quantity", 0),
+                        "entry_price": t.get("price", 0),
+                        "pnl": t.get("pnl", 0),
+                        "status": t.get("status", "open"),
+                    })
+    except Exception:
+        pass
+    
+    # Calculate live P&L for open trades
+    live_prices = {}
+    if supervisor and supervisor._agents.get("market_data"):
+        mda = supervisor._agents["market_data"]
+        for key, data in mda._market_data.items():
+            sym = data.get("symbol", key.split(":")[-1])
+            live_prices[sym] = data.get("ltp", 0)
+    
+    # Aggregate by symbol
+    symbol_stats = defaultdict(lambda: {
+        'total_pnl': 0.0,
+        'total_cost': 0.0,
+        'trade_count': 0,
+        'win_count': 0,
+        'loss_count': 0,
+    })
+    
+    for trade in all_trades:
+        symbol = trade.get('symbol') or trade.get('tradingsymbol') or ''
+        if not symbol:
+            continue
+        
+        pnl = float(trade.get('pnl') or 0)
+        entry_price = float(trade.get('entry_price') or trade.get('price') or 0)
+        quantity = int(trade.get('quantity') or 1)
+        side = (trade.get('side') or trade.get('transactiontype') or '').upper()
+        status = (trade.get('status') or '').lower()
+        
+        # For open trades, calculate live P&L
+        if status == 'open' and pnl == 0 and entry_price > 0 and symbol in live_prices:
+            ltp = live_prices[symbol]
+            if ltp > 0:
+                if side == 'BUY':
+                    pnl = (ltp - entry_price) * quantity
+                else:
+                    pnl = (entry_price - ltp) * quantity
+        
+        cost = entry_price * quantity if entry_price > 0 else 0
+        
+        stats = symbol_stats[symbol]
+        stats['total_pnl'] += pnl
+        stats['total_cost'] += cost
+        stats['trade_count'] += 1
+        if pnl > 0:
+            stats['win_count'] += 1
+        elif pnl < 0:
+            stats['loss_count'] += 1
+    
+    # Build result sorted by PnL descending
+    result = []
+    for symbol, stats in symbol_stats.items():
+        win_rate = (stats['win_count'] / stats['trade_count'] * 100) if stats['trade_count'] > 0 else 0
+        return_rate = (stats['total_pnl'] / stats['total_cost'] * 100) if stats['total_cost'] > 0 else 0
+        result.append({
+            'symbol': symbol,
+            'total_pnl': round(stats['total_pnl'], 2),
+            'return_rate': round(return_rate, 2),
+            'trade_count': stats['trade_count'],
+            'win_count': stats['win_count'],
+            'loss_count': stats['loss_count'],
+            'win_rate': round(win_rate, 1),
+        })
+    
+    result.sort(key=lambda x: x['total_pnl'], reverse=True)
+    
+    return {"status": "success", "data": result}
+
+
 @app.get("/api/logs/history")
 async def get_log_history(limit: int = 50):
     """Get agent logs from database."""
@@ -1232,6 +1420,34 @@ async def get_funds():
     """Get account funds."""
     # Handle Paper Mode
     if settings.trading_mode == TradingMode.PAPER:
+        # Always load from DB for persistence across restarts
+        try:
+            account = get_paper_account(user_id=1)
+            if account:
+                current_balance = account['current_balance']
+                initial_capital = account['initial_capital']
+                total_pnl = account.get('total_pnl', 0)
+                
+                # Calculate used margin from open trades
+                open_trades = get_paper_trades(user_id=1, limit=500)
+                used_margin = sum(
+                    float(t.get('entry_price', 0) or 0) * int(t.get('quantity', 0) or 0)
+                    for t in open_trades if (t.get('status') or '').lower() == 'open'
+                )
+                
+                return {
+                    "available": current_balance,
+                    "utilized": used_margin,
+                    "margin": current_balance,
+                    "collateral": 0,
+                    "total_pnl": total_pnl,
+                    "initial_capital": initial_capital,
+                    "mode": "paper"
+                }
+        except Exception as e:
+            logger.error(f"Paper funds DB fetch error: {e}")
+        
+        # Fallback to broker instance
         broker = BrokerFactory.get_instance()
         if broker and hasattr(broker, "get_funds"):
             try:
@@ -1362,13 +1578,62 @@ async def get_holdings():
 
 @app.get("/api/trades")
 async def get_trades():
-    """Get trade book."""
-    # Paper mode: return paper broker trade history
+    """Get trade book with live P&L for open trades."""
+    # Paper mode: return paper trades from DB with live P&L
     if settings.trading_mode == TradingMode.PAPER:
-        broker = BrokerFactory.get_instance()
-        if broker and hasattr(broker, '_trade_history'):
-            return broker._trade_history
-        return []
+        try:
+            trades = get_paper_trades(user_id=1, limit=100)
+            
+            # Also include in-memory trades from current session that may not be in DB yet
+            broker = BrokerFactory.get_instance()
+            if broker and hasattr(broker, '_trade_history') and broker._trade_history:
+                db_trade_ids = {t.get('trade_id') for t in trades if t.get('trade_id')}
+                for t in broker._trade_history:
+                    if t.get('order_id') not in db_trade_ids:
+                        trades.insert(0, {
+                            "symbol": t.get("symbol", ""),
+                            "side": t.get("side", ""),
+                            "quantity": t.get("quantity", 0),
+                            "entry_price": t.get("price", 0),
+                            "status": "open",
+                            "entry_time": t.get("timestamp", ""),
+                            "pnl": 0,
+                        })
+            
+            # Calculate live P&L for open trades using current market prices
+            live_prices = {}
+            if supervisor and supervisor._agents.get("market_data"):
+                mda = supervisor._agents["market_data"]
+                for key, data in mda._market_data.items():
+                    sym = data.get("symbol", key.split(":")[-1])
+                    live_prices[sym] = data.get("ltp", 0)
+            
+            for trade in trades:
+                symbol = trade.get("symbol", "")
+                entry_price = float(trade.get("entry_price") or 0)
+                quantity = int(trade.get("quantity") or 0)
+                side = (trade.get("side") or "").upper()
+                status = (trade.get("status") or "").lower()
+                
+                if status == "open" and entry_price > 0 and symbol in live_prices:
+                    ltp = live_prices[symbol]
+                    if ltp > 0:
+                        if side == "BUY":
+                            pnl = (ltp - entry_price) * quantity
+                        else:  # SELL
+                            pnl = (entry_price - ltp) * quantity
+                        pnl_pct = ((ltp - entry_price) / entry_price * 100) if entry_price > 0 else 0
+                        if side == "SELL":
+                            pnl_pct = -pnl_pct
+                        trade["pnl"] = round(pnl, 2)
+                        trade["pnl_pct"] = round(pnl_pct, 2)
+                        trade["exit_price"] = ltp  # Show current LTP as "exit" for open trades
+                        trade["current_ltp"] = ltp
+            
+            return trades
+        except Exception as e:
+            logger.error(f"Paper trades fetch error: {e}")
+            return []
 
     # Live mode
     if settings.trading_mode == TradingMode.LIVE:
@@ -1435,6 +1700,140 @@ def save_broker_accounts(accounts: list):
 
 # In-memory connected sessions
 connected_brokers: Dict[str, Any] = {}
+
+
+async def auto_restore_broker_connection():
+    """Try to restore broker connection from saved JWT tokens on startup."""
+    global connected_brokers
+    try:
+        accounts = load_broker_accounts()
+        for account in accounts:
+            if not account.get("jwt_token") or not account.get("refresh_token"):
+                continue
+            
+            try:
+                api_key = decrypt_value(account["api_key_encrypted"])
+                pin = decrypt_value(account["pin_encrypted"])
+                jwt_token = decrypt_value(account["jwt_token"])
+                refresh_token = decrypt_value(account["refresh_token"])
+                feed_token = account.get("feed_token", "")
+                
+                if not jwt_token:
+                    continue
+                
+                from SmartApi import SmartConnect
+                smart_api = SmartConnect(api_key=api_key)
+                
+                # Inject saved tokens directly (skip TOTP login)
+                smart_api.setSessionExpiryHook(lambda: logger.warning("Session expired"))
+                smart_api.setAccessToken(jwt_token)
+                smart_api.setRefreshToken(refresh_token)
+                smart_api.setFeedToken(feed_token)
+                smart_api.setUserId(account["client_id"])
+                
+                # Verify session is alive with a simple API call
+                response = await asyncio.to_thread(smart_api.rmsLimit)
+                if not response or not response.get("data"):
+                    # JWT expired — try refreshing the token
+                    logger.info(f"JWT expired for {account['client_id']}, trying refresh token...")
+                    try:
+                        token_resp = await asyncio.to_thread(smart_api.generateToken, refresh_token)
+                        if token_resp and token_resp.get("data"):
+                            new_jwt = token_resp["data"].get("jwtToken", "")
+                            new_refresh = token_resp["data"].get("refreshToken", refresh_token)
+                            new_feed = token_resp["data"].get("feedToken", feed_token)
+                            if new_jwt:
+                                smart_api.setAccessToken(new_jwt)
+                                smart_api.setRefreshToken(new_refresh)
+                                smart_api.setFeedToken(new_feed)
+                                jwt_token = new_jwt
+                                refresh_token = new_refresh
+                                feed_token = new_feed
+                                # Save updated tokens
+                                account["jwt_token"] = encrypt_value(new_jwt)
+                                account["refresh_token"] = encrypt_value(new_refresh)
+                                account["feed_token"] = new_feed
+                                save_broker_accounts(accounts)
+                                logger.info(f"✅ Token refreshed for {account['client_id']}")
+                            else:
+                                logger.warning(f"Token refresh returned no JWT for {account['client_id']}")
+                                continue
+                        else:
+                            logger.warning(f"Token refresh failed for {account['client_id']}: {token_resp}")
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Token refresh error for {account['client_id']}: {e}")
+                        continue
+                
+                # Session is alive — restore connection
+                connected_brokers[account["id"]] = {
+                    "smart_api": smart_api,
+                    "session": {"data": {"jwtToken": jwt_token, "refreshToken": refresh_token, "feedToken": feed_token}},
+                    "connected_at": account.get("last_connected", datetime.now().isoformat())
+                }
+                
+                # Register with factory
+                from src.broker import AngelOneBroker
+                angel_broker = AngelOneBroker(
+                    api_key=api_key,
+                    client_id=account["client_id"],
+                    password=pin,
+                    totp_secret=""
+                )
+                angel_broker._client = smart_api
+                angel_broker._auth_token = jwt_token
+                angel_broker._refresh_token = refresh_token
+                angel_broker._feed_token = feed_token
+                angel_broker._connected = True
+                
+                BrokerFactory.set_connected_broker(angel_broker)
+                BrokerFactory.create()
+                
+                logger.info(f"✅ Broker auto-restored: {account['client_id']}")
+                
+                # Fetch symbols in background
+                asyncio.create_task(fetch_symbols_background(account["id"]))
+                
+                # Quick data probe
+                asyncio.create_task(probe_live_data_after_connect(smart_api))
+                
+            except ImportError:
+                logger.warning("SmartApi not installed, skipping auto-restore")
+                break
+            except Exception as e:
+                logger.warning(f"Auto-restore failed for {account.get('client_id', '?')}: {e}")
+                continue
+    except Exception as e:
+        logger.warning(f"Broker auto-restore error: {e}")
+
+
+async def probe_live_data_after_connect(smart_api):
+    """Quick probe: fetch LTP for a known symbol to confirm data is flowing."""
+    try:
+        await asyncio.sleep(2)  # Small delay for connection to settle
+        # Try fetching RELIANCE LTP (token 2885 on NSE)
+        response = await asyncio.to_thread(
+            smart_api.ltpData, "NSE", "RELIANCE-EQ", "2885"
+        )
+        if response and response.get("data"):
+            ltp = response["data"].get("ltp", 0)
+            logger.info(f"✅ Live data probe: RELIANCE LTP = ₹{ltp}")
+            
+            # Update market data agent if available
+            if supervisor and supervisor._agents.get("market_data"):
+                mda = supervisor._agents["market_data"]
+                mda._market_data["NSE:RELIANCE"] = {
+                    "symbol": "RELIANCE",
+                    "exchange": "NSE",
+                    "ltp": ltp,
+                    "source": "probe"
+                }
+                mda._last_fetch_time = datetime.now().isoformat()
+                logger.info(f"Market data agent updated with probe data")
+        else:
+            logger.warning(f"Live data probe failed: {response}")
+    except Exception as e:
+        logger.warning(f"Live data probe error: {e}")
 
 
 class BrokerAccountRequest(BaseModel):
@@ -1610,8 +2009,26 @@ async def connect_broker(request: BrokerConnectRequest):
             
             logger.info(f"Broker connected: {account['client_id']}")
             
+            # Save tokens to broker_accounts.json for session restore
+            try:
+                session_data = session.get("data", {})
+                for acc in accounts:
+                    if acc["id"] == request.account_id:
+                        acc["jwt_token"] = encrypt_value(session_data.get("jwtToken", ""))
+                        acc["refresh_token"] = encrypt_value(session_data.get("refreshToken", ""))
+                        acc["feed_token"] = session_data.get("feedToken", "")
+                        acc["last_connected"] = datetime.now().isoformat()
+                        break
+                save_broker_accounts(accounts)
+                logger.info("Broker tokens saved for session restore")
+            except Exception as e:
+                logger.warning(f"Failed to save broker tokens: {e}")
+            
             # Start symbol fetching in background
             asyncio.create_task(fetch_symbols_background(request.account_id))
+            
+            # Quick data probe — fetch one quote to confirm data flows
+            asyncio.create_task(probe_live_data_after_connect(smart_api))
             
             return {
                 "success": True,
@@ -2022,6 +2439,93 @@ async def broadcast_agent_message(agent: str, message: str):
 
 
 # ============================================
+# Paper Trading Account
+# ============================================
+
+@app.get("/api/paper/account")
+async def get_paper_account_api():
+    """Get paper trading account details."""
+    from src.database import get_paper_account, get_paper_trades
+    account = get_paper_account(user_id=1)
+    trades = get_paper_trades(user_id=1, limit=50)
+    
+    win_rate = 0
+    if account and account['total_trades'] > 0:
+        win_rate = round((account['winning_trades'] / account['total_trades']) * 100, 1)
+    
+    return {
+        "initial_capital": account['initial_capital'] if account else 1000000,
+        "current_balance": account['current_balance'] if account else 1000000,
+        "total_pnl": account['total_pnl'] if account else 0,
+        "total_trades": account['total_trades'] if account else 0,
+        "winning_trades": account['winning_trades'] if account else 0,
+        "losing_trades": account['losing_trades'] if account else 0,
+        "win_rate": win_rate,
+        "updated_at": account['updated_at'] if account else None,
+        "recent_trades": trades
+    }
+
+
+class PaperCapitalRequest(BaseModel):
+    capital: float
+
+
+@app.post("/api/paper/capital")
+async def set_paper_capital_api(request: PaperCapitalRequest):
+    """Set paper trading initial capital (resets account)."""
+    if request.capital < 1000:
+        raise HTTPException(status_code=400, detail="Minimum capital is ₹1,000")
+    if request.capital > 100000000:
+        raise HTTPException(status_code=400, detail="Maximum capital is ₹10,00,00,000")
+    
+    from src.database import set_paper_capital
+    set_paper_capital(user_id=1, capital=request.capital)
+    
+    # Update PaperBroker if active
+    broker = BrokerFactory.get_instance()
+    if broker and hasattr(broker, 'initial_capital'):
+        broker.initial_capital = request.capital
+        broker.available_capital = request.capital
+    
+    return {"success": True, "message": f"Paper capital set to ₹{request.capital:,.2f}"}
+
+
+@app.post("/api/paper/reset")
+async def reset_paper_account_api():
+    """Reset paper account to initial capital, clear all trades."""
+    from src.database import reset_paper_account
+    capital = reset_paper_account(user_id=1)
+    
+    # Reset PaperBroker state
+    broker = BrokerFactory.get_instance()
+    if broker and hasattr(broker, 'reset'):
+        broker.reset()
+        broker.initial_capital = capital
+        broker.available_capital = capital
+    
+    return {"success": True, "message": f"Paper account reset to ₹{capital:,.2f}"}
+
+
+@app.get("/api/paper/trades")
+async def get_paper_trades_api(limit: int = 200):
+    """Get paper trading trade history."""
+    from src.database import get_paper_trades
+    trades = get_paper_trades(user_id=1, limit=limit)
+    return {"trades": trades}
+
+
+@app.delete("/api/paper/trades")
+async def clear_paper_trades_api():
+    """Clear all paper trades (keep account balance)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM paper_trades WHERE user_id = 1')
+    conn.commit()
+    conn.close()
+    return {"success": True, "message": "Paper trades cleared"}
+
+
+# ============================================
 # Agent Status & Control
 # ============================================
 
@@ -2031,19 +2535,19 @@ async def get_agent_status():
     broker_connected = len(connected_brokers) > 0
     is_running = supervisor._is_running if supervisor else False
     
-    # Check LLM availability — check both runtime settings AND strategy agent state
-    llm_enabled = bool(
+    # Check LLM availability — keys exist means LLM is available
+    llm_available = bool(
         settings.openai_api_key or settings.anthropic_api_key or 
         settings.groq_api_key or settings.deepseek_api_key or 
         settings.gemini_api_key
     )
     
     # Also check if keys exist in DB (may not be loaded into runtime yet)
-    if not llm_enabled:
+    if not llm_available:
         try:
             db_keys = get_api_keys(user_id=1)
             if any(k["is_active"] for k in db_keys):
-                llm_enabled = True
+                llm_available = True
                 # Load the key into runtime settings
                 decrypted = get_api_key_decrypted(user_id=1, provider=db_keys[0]["provider"])
                 if decrypted:
@@ -2066,12 +2570,12 @@ async def get_agent_status():
         except Exception:
             pass
     
-    # Check if strategy agent has LLM toggled on (user clicked the button)
-    strategy_llm_on = False
+    # Check if user has toggled LLM ON via the button (strategy agent tracks this)
+    llm_enabled = False
     if supervisor:
         strategy = supervisor.get_agent("strategy")
         if strategy and hasattr(strategy, 'use_llm'):
-            strategy_llm_on = strategy.use_llm
+            llm_enabled = strategy.use_llm
     
     llm_ready = False
     try:
@@ -2079,7 +2583,7 @@ async def get_agent_status():
         llm = LLMFactory.get_instance()
         if llm:
             llm_ready = True
-        elif llm_enabled:
+        elif llm_available:
             llm = LLMFactory.get_or_create()
             if llm:
                 llm_ready = True
@@ -2089,7 +2593,8 @@ async def get_agent_status():
     return {
         "running": is_running,
         "broker_connected": broker_connected,
-        "llm_enabled": llm_enabled or strategy_llm_on,
+        "llm_enabled": llm_enabled,
+        "llm_available": llm_available,
         "llm_ready": llm_ready,
         "llm_provider": settings.llm_provider.value if settings.llm_provider else "none",
         "llm_model": settings.llm_model,
@@ -2302,3 +2807,14 @@ async def stop_agent():
     """Stop the trading agent."""
     await agent_ws_manager.send_agent_message("Supervisor", "🛑 Agent stopped")
     return {"success": True, "message": "Agent stopped"}
+
+
+# Run server
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host=settings.api_host,
+        port=settings.api_port,
+        reload=True
+    )

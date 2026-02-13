@@ -152,6 +152,52 @@ def init_db():
         )
     ''')
     
+    # Paper trading account - persistent balance
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS paper_account (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            initial_capital REAL NOT NULL DEFAULT 1000000,
+            current_balance REAL NOT NULL DEFAULT 1000000,
+            total_pnl REAL DEFAULT 0,
+            total_trades INTEGER DEFAULT 0,
+            winning_trades INTEGER DEFAULT 0,
+            losing_trades INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE(user_id)
+        )
+    ''')
+    
+    # Paper trading trade log - every trade stored
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            trade_id TEXT,
+            symbol TEXT NOT NULL,
+            exchange TEXT DEFAULT 'NSE',
+            side TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            entry_price REAL,
+            exit_price REAL,
+            pnl REAL DEFAULT 0,
+            pnl_pct REAL DEFAULT 0,
+            status TEXT DEFAULT 'open',
+            order_type TEXT DEFAULT 'MARKET',
+            stop_loss REAL,
+            take_profit REAL,
+            entry_time TIMESTAMP,
+            exit_time TIMESTAMP,
+            close_reason TEXT,
+            strategy TEXT,
+            cycle_number INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+    
     conn.commit()
     
     # Create default users if not exist
@@ -486,6 +532,149 @@ def get_user_trades(user_id: int = None, limit: int = 100):
     trades = [dict(row) for row in cursor.fetchall()]
     conn.close()
     
+    return trades
+
+
+# ============================================
+# Paper Account Functions
+# ============================================
+
+def get_paper_account(user_id: int = 1):
+    """Get paper trading account. Creates default if not exists."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM paper_account WHERE user_id = ?', (user_id,))
+    account = cursor.fetchone()
+    if not account:
+        cursor.execute('''
+            INSERT INTO paper_account (user_id, initial_capital, current_balance)
+            VALUES (?, 1000000, 1000000)
+        ''', (user_id,))
+        conn.commit()
+        cursor.execute('SELECT * FROM paper_account WHERE user_id = ?', (user_id,))
+        account = cursor.fetchone()
+    conn.close()
+    return dict(account) if account else None
+
+
+def update_paper_account(user_id: int = 1, **kwargs):
+    """Update paper account fields."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    # Ensure account exists
+    cursor.execute('SELECT id FROM paper_account WHERE user_id = ?', (user_id,))
+    if not cursor.fetchone():
+        cursor.execute('INSERT INTO paper_account (user_id) VALUES (?)', (user_id,))
+    
+    updates = ', '.join([f"{k} = ?" for k in kwargs.keys()])
+    values = list(kwargs.values())
+    cursor.execute(f'''
+        UPDATE paper_account SET {updates}, updated_at = ? WHERE user_id = ?
+    ''', values + [datetime.now().isoformat(), user_id])
+    conn.commit()
+    conn.close()
+
+
+def set_paper_capital(user_id: int, capital: float):
+    """Set paper trading initial capital and reset balance."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM paper_account WHERE user_id = ?', (user_id,))
+    if cursor.fetchone():
+        cursor.execute('''
+            UPDATE paper_account SET initial_capital = ?, current_balance = ?,
+            total_pnl = 0, total_trades = 0, winning_trades = 0, losing_trades = 0,
+            updated_at = ? WHERE user_id = ?
+        ''', (capital, capital, datetime.now().isoformat(), user_id))
+    else:
+        cursor.execute('''
+            INSERT INTO paper_account (user_id, initial_capital, current_balance)
+            VALUES (?, ?, ?)
+        ''', (user_id, capital, capital))
+    conn.commit()
+    conn.close()
+
+
+def reset_paper_account(user_id: int = 1):
+    """Reset paper account to initial capital, clear all paper trades."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT initial_capital FROM paper_account WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    capital = row['initial_capital'] if row else 1000000
+    cursor.execute('''
+        UPDATE paper_account SET current_balance = ?, total_pnl = 0,
+        total_trades = 0, winning_trades = 0, losing_trades = 0, updated_at = ?
+        WHERE user_id = ?
+    ''', (capital, datetime.now().isoformat(), user_id))
+    cursor.execute('DELETE FROM paper_trades WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+    return capital
+
+
+def save_paper_trade(user_id: int, trade: dict):
+    """Save a paper trade to DB."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO paper_trades (user_id, trade_id, symbol, exchange, side, quantity,
+            entry_price, exit_price, pnl, pnl_pct, status, order_type, stop_loss,
+            take_profit, entry_time, exit_time, close_reason, strategy, cycle_number)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        user_id,
+        trade.get('trade_id'),
+        trade.get('symbol'),
+        trade.get('exchange', 'NSE'),
+        trade.get('side'),
+        trade.get('quantity', 0),
+        trade.get('entry_price'),
+        trade.get('exit_price'),
+        trade.get('pnl', 0),
+        trade.get('pnl_pct', 0),
+        trade.get('status', 'open'),
+        trade.get('order_type', 'MARKET'),
+        trade.get('stop_loss'),
+        trade.get('take_profit'),
+        trade.get('entry_time'),
+        trade.get('exit_time'),
+        trade.get('close_reason'),
+        trade.get('strategy'),
+        trade.get('cycle_number')
+    ))
+    trade_id = cursor.lastrowid
+    
+    # Update paper account balance
+    pnl = trade.get('pnl', 0)
+    if pnl != 0 and trade.get('status') == 'closed':
+        cursor.execute('''
+            UPDATE paper_account SET 
+                current_balance = current_balance + ?,
+                total_pnl = total_pnl + ?,
+                total_trades = total_trades + 1,
+                winning_trades = winning_trades + ?,
+                losing_trades = losing_trades + ?,
+                updated_at = ?
+            WHERE user_id = ?
+        ''', (pnl, pnl, 1 if pnl > 0 else 0, 1 if pnl < 0 else 0,
+              datetime.now().isoformat(), user_id))
+    
+    conn.commit()
+    conn.close()
+    return trade_id
+
+
+def get_paper_trades(user_id: int = 1, limit: int = 200):
+    """Get paper trades."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT * FROM paper_trades WHERE user_id = ?
+        ORDER BY created_at DESC LIMIT ?
+    ''', (user_id, limit))
+    trades = [dict(row) for row in cursor.fetchall()]
+    conn.close()
     return trades
 
 

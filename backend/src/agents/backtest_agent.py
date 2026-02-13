@@ -6,6 +6,7 @@ Calculates comprehensive metrics: Sharpe, Sortino, Calmar, drawdown duration, et
 """
 
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import math
@@ -200,10 +201,41 @@ class BacktestAgent(BaseAgent):
         start_date: datetime,
         end_date: datetime
     ) -> pd.DataFrame:
-        """Fetch historical candle data and return as DataFrame."""
+        """Fetch historical candle data. Uses local CSV first, then broker API."""
+
+        # ─── Method 1: Local CSV files (downloaded via download_historical.py) ───
+        csv_path = Path(__file__).parent.parent.parent / "data" / "historical" / symbol / f"{symbol}_{interval}.csv"
+        if csv_path.exists():
+            try:
+                df = pd.read_csv(str(csv_path), parse_dates=["timestamp"], index_col="timestamp")
+                df.sort_index(inplace=True)
+                # Filter by date range - handle timezone-aware vs naive
+                if start_date:
+                    start_ts = pd.Timestamp(start_date)
+                    if df.index.tz is not None and start_ts.tz is None:
+                        start_ts = start_ts.tz_localize(df.index.tz)
+                    elif df.index.tz is None and start_ts.tz is not None:
+                        start_ts = start_ts.tz_localize(None)
+                    df = df[df.index >= start_ts]
+                if end_date:
+                    end_ts = pd.Timestamp(end_date)
+                    if df.index.tz is not None and end_ts.tz is None:
+                        end_ts = end_ts.tz_localize(df.index.tz)
+                    elif df.index.tz is None and end_ts.tz is not None:
+                        end_ts = end_ts.tz_localize(None)
+                    df = df[df.index <= end_ts]
+                if not df.empty:
+                    logger.info(f"Loaded {len(df)} candles from CSV: {csv_path.name}")
+                    return df
+                else:
+                    logger.warning(f"CSV loaded but empty after date filter for {symbol}")
+            except Exception as e:
+                logger.warning(f"CSV load failed for {symbol}: {e}")
+
+        # ─── Method 2: Broker API (Angel One) ───
         broker = self._get_data_broker()
         if not broker:
-            logger.warning("No data broker available for backtest")
+            logger.warning(f"No data source for {symbol} - no CSV and no broker")
             return pd.DataFrame()
 
         try:
@@ -216,7 +248,7 @@ class BacktestAgent(BaseAgent):
             )
 
             if not candles:
-                logger.warning(f"No historical data for {symbol}")
+                logger.warning(f"No historical data for {symbol} from broker")
                 return pd.DataFrame()
 
             data = [{
@@ -236,6 +268,7 @@ class BacktestAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Historical data fetch error for {symbol}: {e}")
             return pd.DataFrame()
+
 
     # ============================================
     # Technical Indicators

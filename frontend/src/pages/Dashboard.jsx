@@ -30,13 +30,16 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
         fetchData();
         fetchSymbols();
         fetchAgentStatus();
+        fetchSymbolRanking();
         connectWebSocket();
 
         const interval = setInterval(fetchData, 5000);
         const agentInterval = setInterval(fetchAgentStatus, 10000);
+        const rankingInterval = setInterval(fetchSymbolRanking, 10000);
         return () => {
             clearInterval(interval);
             clearInterval(agentInterval);
+            clearInterval(rankingInterval);
             if (wsRef.current) wsRef.current.close();
         };
     }, [mode]); // Re-fetch when mode changes
@@ -81,6 +84,29 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
             }
         } catch (err) {
             console.log('LLM metrics fetch failed');
+        }
+    };
+
+    const fetchSymbolRanking = async () => {
+        try {
+            const res = await fetch('/api/symbol_stats');
+            if (res.ok) {
+                const data = await res.json();
+                if (data.status === 'success' && data.data && data.data.length > 0) {
+                    const ranked = data.data.map((item, idx) => ({
+                        rank: idx + 1,
+                        symbol: item.symbol,
+                        pnl: item.total_pnl,
+                        wins: `${item.win_count}W/${item.loss_count}L`,
+                        winRate: item.win_rate,
+                        trades: item.trade_count,
+                        returnRate: item.return_rate,
+                    }));
+                    setRanking(ranked);
+                }
+            }
+        } catch (err) {
+            console.log('Symbol ranking fetch failed');
         }
     };
 
@@ -165,7 +191,7 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 const data = JSON.parse(event.data);
 
                 if (data.type === 'agent_message') {
-                    setAgentMessages(prev => [data.data, ...prev].slice(0, 50));
+                    setAgentMessages(prev => [data.data, ...prev].slice(0, 30));
                 }
 
                 if (data.type === 'trade') {
@@ -202,19 +228,27 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 setFunds(fundsData || { available: 0, utilized: 0 });
             }
 
-            // Update trade records from broker (live mode)
+            // Update trade records from broker/DB
             if (tradesRes?.ok) {
                 const tradesData = await tradesRes.json();
                 if (tradesData && tradesData.length > 0) {
-                    // Transform broker trades to our format
-                    const formattedTrades = tradesData.map(t => ({
-                        time: t.updatetime || t.orderUpdateTime || new Date().toLocaleTimeString(),
-                        symbol: t.tradingsymbol || t.symbol,
-                        side: t.transactiontype || t.side || '--',
-                        entry: parseFloat(t.fillprice || t.price || 0),
-                        exit: null,
-                        pnl: 0
-                    }));
+                    const formattedTrades = tradesData.map(t => {
+                        const rawTime = t.entry_time || t.updatetime || t.orderUpdateTime || t.created_at || '';
+                        let displayTime = rawTime;
+                        try {
+                            if (rawTime) displayTime = new Date(rawTime).toLocaleTimeString('en-IN');
+                        } catch(e) {}
+                        return {
+                            time: displayTime,
+                            symbol: t.symbol || t.tradingsymbol || '--',
+                            side: t.side || t.transactiontype || '--',
+                            entry: parseFloat(t.entry_price || t.fillprice || t.price || 0),
+                            exit: t.exit_price ? parseFloat(t.exit_price) : null,
+                            pnl: parseFloat(t.pnl || 0),
+                            status: t.status || 'open',
+                            quantity: parseInt(t.quantity || 1)
+                        };
+                    });
                     setTradeRecords(formattedTrades);
                 }
             }
@@ -430,13 +464,14 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                                     <th>#</th>
                                     <th>Symbol</th>
                                     <th className="text-right">PnL</th>
-                                    <th className="text-right">Wins</th>
+                                    <th className="text-right">W/L</th>
+                                    <th className="text-right">Win%</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {ranking.length === 0 ? (
                                     <tr>
-                                        <td colSpan="4" className="text-center empty-msg">
+                                        <td colSpan="5" className="text-center empty-msg">
                                             No completed trades in current session
                                         </td>
                                     </tr>
@@ -449,6 +484,9 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                                                 {item.pnl >= 0 ? '+' : ''}₹{item.pnl?.toFixed(2)}
                                             </td>
                                             <td className="text-right">{item.wins}</td>
+                                            <td className={`text-right ${item.winRate >= 50 ? 'pos' : 'neg'}`}>
+                                                {item.winRate?.toFixed(0)}%
+                                            </td>
                                         </tr>
                                     ))
                                 )}
@@ -472,15 +510,16 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                                         <th>Time</th>
                                         <th>Symbol</th>
                                         <th>Side</th>
+                                        <th>Qty</th>
                                         <th>Entry</th>
-                                        <th>Exit</th>
-                                        <th>PnL</th>
+                                        <th>LTP/Exit</th>
+                                        <th>P&L</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {tradeRecords.length === 0 ? (
                                         <tr>
-                                            <td colSpan="6" className="text-center empty-msg">
+                                            <td colSpan="7" className="text-center empty-msg">
                                                 No trades yet
                                             </td>
                                         </tr>
@@ -494,8 +533,9 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                                                         {trade.side}
                                                     </span>
                                                 </td>
+                                                <td>{trade.quantity}</td>
                                                 <td>₹{trade.entry?.toFixed(2) || '--'}</td>
-                                                <td>₹{trade.exit?.toFixed(2) || '--'}</td>
+                                                <td>{trade.exit ? `₹${trade.exit.toFixed(2)}` : '--'}</td>
                                                 <td className={trade.pnl >= 0 ? 'pos' : 'neg'}>
                                                     {trade.pnl >= 0 ? '+' : ''}₹{trade.pnl?.toFixed(2) || '0.00'}
                                                 </td>
@@ -897,6 +937,8 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                     margin: 16px;
                     border-radius: 8px;
                     overflow: hidden;
+                    max-height: 520px;
+                    min-height: 300px;
                 }
 
                 .chatroom-messages {
@@ -905,7 +947,7 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                     padding: 16px;
                     display: flex;
                     flex-direction: column;
-                    gap: 12px;
+                    gap: 8px;
                 }
 
                 .chatroom-empty {
@@ -927,8 +969,14 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 .chat-bubble {
                     background: rgba(240, 185, 11, 0.08);
                     border-left: 4px solid #F0B90B;
-                    border-radius: 8px;
-                    padding: 12px 16px;
+                    border-radius: 6px;
+                    padding: 8px 12px;
+                    animation: slideIn 0.3s ease-out;
+                }
+
+                @keyframes slideIn {
+                    from { opacity: 0; transform: translateY(-8px); }
+                    to { opacity: 1; transform: translateY(0); }
                 }
 
                 .chat-bubble.system {
@@ -949,7 +997,7 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 .chat-header {
                     display: flex;
                     justify-content: space-between;
-                    margin-bottom: 8px;
+                    margin-bottom: 4px;
                 }
 
                 .chat-agent {
@@ -965,9 +1013,24 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 }
 
                 .chat-content {
-                    font-size: 0.9rem;
-                    line-height: 1.5;
+                    font-size: 0.82rem;
+                    line-height: 1.4;
                     color: #EAECEF;
+                }
+
+                /* Chatroom scrollbar */
+                .chatroom-messages::-webkit-scrollbar {
+                    width: 4px;
+                }
+                .chatroom-messages::-webkit-scrollbar-track {
+                    background: transparent;
+                }
+                .chatroom-messages::-webkit-scrollbar-thumb {
+                    background: rgba(255,255,255,0.1);
+                    border-radius: 4px;
+                }
+                .chatroom-messages::-webkit-scrollbar-thumb:hover {
+                    background: rgba(255,255,255,0.2);
                 }
 
                 /* Ranking Card */
@@ -1045,15 +1108,18 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 }
 
                 .mini-records th {
-                    font-size: 0.7rem;
-                    font-weight: 600;
+                    font-size: 0.75rem;
+                    font-weight: 700;
                     text-transform: uppercase;
-                    color: #5E6673;
+                    color: #B7BDC6;
                     padding: 10px 8px;
                     text-align: left;
-                    background: rgba(0, 0, 0, 0.2);
+                    background: #1a1f27;
+                    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
                     position: sticky;
                     top: 0;
+                    z-index: 2;
+                    letter-spacing: 0.5px;
                 }
 
                 .mini-records td {
