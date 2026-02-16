@@ -626,6 +626,8 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 .sidebar-left {
                     grid-column: 1;
                     grid-row: 1;
+                    max-height: calc(100vh - 180px);
+                    overflow-y: auto;
                 }
 
                 .hero-center {
@@ -638,6 +640,27 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 .sidebar-right {
                     grid-column: 3;
                     grid-row: 1;
+                    max-height: calc(100vh - 180px);
+                    overflow-y: auto;
+                }
+
+                /* Sidebar scrollbars */
+                .sidebar-left::-webkit-scrollbar,
+                .sidebar-right::-webkit-scrollbar {
+                    width: 6px;
+                }
+                .sidebar-left::-webkit-scrollbar-track,
+                .sidebar-right::-webkit-scrollbar-track {
+                    background: transparent;
+                }
+                .sidebar-left::-webkit-scrollbar-thumb,
+                .sidebar-right::-webkit-scrollbar-thumb {
+                    background: rgba(255, 255, 255, 0.1);
+                    border-radius: 3px;
+                }
+                .sidebar-left::-webkit-scrollbar-thumb:hover,
+                .sidebar-right::-webkit-scrollbar-thumb:hover {
+                    background: rgba(255, 255, 255, 0.2);
                 }
 
                 .bottom-detail-panels {
@@ -718,7 +741,6 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
                 /* Positions List */
                 .positions-list-container {
                     flex: 1;
-                    overflow-y: auto;
                     min-height: 100px;
                     margin-bottom: 16px;
                 }
@@ -1050,7 +1072,6 @@ const Dashboard = ({ status, mode, cycleCount, isRunning }) => {
 
                 .ranking-compact-container {
                     flex: 1;
-                    overflow-y: auto;
                 }
 
                 .compact-table {
